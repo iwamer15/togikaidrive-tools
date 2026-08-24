@@ -60,6 +60,17 @@ async function buildIconSet() {
     bolt_white: [fa.FaBolt, WHITE],
     bolt_navy: [fa.FaBolt, NAVY],
     filter_white: [fa.FaFilter, WHITE],
+    map_navy: [fa.FaMapMarkerAlt, NAVY],
+    map_white: [fa.FaMapMarkerAlt, WHITE],
+    route_navy: [fa.FaRoute, NAVY],
+    route_white: [fa.FaRoute, WHITE],
+    crosshairs_navy: [fa.FaCrosshairs, NAVY],
+    crosshairs_white: [fa.FaCrosshairs, WHITE],
+    shield_navy: [fa.FaShieldAlt, NAVY],
+    shield_white: [fa.FaShieldAlt, WHITE],
+    flask_navy: [fa.FaFlask, NAVY],
+    flask_white: [fa.FaFlask, WHITE],
+    layers_white: [fa.FaLayerGroup, WHITE],
   };
   const out = {};
   for (const [key, [comp, color]] of Object.entries(specs)) {
@@ -581,7 +592,7 @@ async function main() {
   {
     const s = pres.addSlide();
     s.background = { color: WHITE };
-    eyebrow(s, "03 / ultrasonic.py・camera.py・lidar.py");
+    eyebrow(s, "03 / ultrasonic.py / camera.py / lidar.py");
     slideTitle(s, "認知 ― センサーで周りを見る");
 
     s.addText("超音波・LiDARは「ToF（Time of Flight）方式」で、波を発射して反射が戻るまでの時間から距離を計算する。カメラは光を捉えて画像として周囲を記録する。", {
@@ -768,7 +779,7 @@ async function main() {
   {
     const s = pres.addSlide();
     s.background = { color: WHITE };
-    eyebrow(s, "06 / train_pytorch.py・data_viewer");
+    eyebrow(s, "06 / train_pytorch.py / data_viewer");
     slideTitle(s, "train_pytorch.py ― 運転を学習する");
 
     s.addText("AIに運転を学習させるための一連の流れ。ルールベースでは対応しきれない状況にも対応できるようになる。", {
@@ -808,7 +819,288 @@ async function main() {
   }
 
   // =========================================================================
-  // Slide 11 — まとめ
+  // Slide 11 — 高度な機能マップ
+  // =========================================================================
+  {
+    const s = pres.addSlide();
+    s.background = { color: WHITE };
+    eyebrow(s, "Advanced Features ― まだまだ広い機能の世界");
+    slideTitle(s, "高度な機能マップ");
+
+    // stat callouts
+    const statY = 1.85, statW = 3.5, statH = 1.15, statGap = 0.4, statLeft = 0.6;
+    const stats = [
+      { big: "473", label: "config.py の設定項目数" },
+      { big: "15〜20%", label: "これまでの基本解説でカバーした範囲" },
+    ];
+    stats.forEach((st, i) => {
+      const x = statLeft + i * (statW + statGap);
+      s.addShape("roundRect", { x, y: statY, w: statW, h: statH, rectRadius: 0.1, fill: { color: NAVY }, line: { type: "none" } });
+      s.addText(st.big, { x: x + 0.25, y: statY + 0.12, w: statW - 0.5, h: 0.6, fontFace: FONT_HEAD, fontSize: 30, bold: true, color: ORANGE, margin: 0 });
+      s.addText(st.label, { x: x + 0.25, y: statY + 0.74, w: statW - 0.5, h: 0.35, fontFace: FONT_BODY, fontSize: 10.5, color: "C7CEDE", margin: 0 });
+    });
+    s.addText("残りの大部分は、本格的なレース競技向けの高度な自律走行技術。ここから5つのジャンルを見ていく。", {
+      x: statLeft + 2 * statW + statGap + 0.3, y: statY, w: 12.73 - (statLeft + 2 * statW + statGap + 0.3), h: statH,
+      valign: "middle", fontFace: FONT_BODY, fontSize: 12.5, color: TEXT_DARK, margin: 0, lineSpacingMultiple: 1.25,
+    });
+
+    const advCards = [
+      { name: "自己位置推定", sub: "SLAM / VSLAM / ArUco / AMCL", ic: icon.map_navy, color: CYAN_TINT, page: "12" },
+      { name: "経路追従・最適制御", sub: "pure pursuit / MPC / MPPI", ic: icon.route_navy, color: ORANGE_TINT, page: "13" },
+      { name: "物体検知", sub: "YOLO", ic: icon.crosshairs_navy, color: STEEL_TINT, page: "14" },
+      { name: "安全機構", sub: "ControlArbiter", ic: icon.shield_navy, color: CYAN_TINT, page: "15" },
+      { name: "強化学習シミュレーター", sub: "togikaidrive-sim", ic: icon.flask_navy, color: ORANGE_TINT, page: "16" },
+    ];
+    const cardW = 2.3, cardH = 3.15, gap = 0.28, top = 3.4;
+    const left = (13.333 - (5 * cardW + 4 * gap)) / 2;
+    advCards.forEach((c, i) => {
+      const x = left + i * (cardW + gap);
+      s.addShape("roundRect", { x, y: top, w: cardW, h: cardH, rectRadius: 0.12, fill: { color: CARD_BG }, line: { type: "none" } });
+      iconCircle(s, c.ic, x + cardW / 2, top + 0.75, 0.95, c.color);
+      s.addText(c.name, {
+        x: x + 0.15, y: top + 1.35, w: cardW - 0.3, h: 0.65, align: "center",
+        fontFace: FONT_HEAD, fontSize: 13, bold: true, color: TEXT_DARK, margin: 0, lineSpacingMultiple: 1.05,
+      });
+      s.addText(c.sub, {
+        x: x + 0.15, y: top + 2.0, w: cardW - 0.3, h: 0.7, align: "center",
+        fontFace: FONT_BODY, fontSize: 9.5, color: MUTED, margin: 0, lineSpacingMultiple: 1.15,
+      });
+      s.addText(`p.${c.page}`, {
+        x: x + 0.15, y: top + cardH - 0.4, w: cardW - 0.3, h: 0.3, align: "center",
+        fontFace: FONT_BODY, fontSize: 9, bold: true, color: MUTED, margin: 0,
+      });
+    });
+
+    pageNum(s, 11);
+  }
+
+  // =========================================================================
+  // Slide 12 — 自己位置推定(SLAM/VSLAM/ArUco/AMCL)
+  // =========================================================================
+  {
+    const s = pres.addSlide();
+    s.background = { color: WHITE };
+    eyebrow(s, "12 / localization/ (SLAM / VSLAM / ArUco / AMCL)");
+    slideTitle(s, "自己位置推定 ― 「今どこにいるか」を知る");
+
+    s.addText("経路追従や最適制御を行うには、まず「自分が地図上のどこに・どの向きにいるか」を推定する必要がある。用途に応じて4種類の方式が用意されている。", {
+      x: 0.6, y: 1.75, w: 11.9, h: 0.55,
+      fontFace: FONT_BODY, fontSize: 13, color: TEXT_DARK, margin: 0, lineSpacingMultiple: 1.2,
+    });
+
+    const rows = [
+      ["lidar_slam", "2D LiDAR", "不要(numpy/scipyのみ)", "占有格子地図 + スキャンマッチング(自前実装)"],
+      ["slam_toolbox", "2D LiDAR", "ROS2必須", "ポーズグラフSLAM。ループクロージャ対応"],
+      ["amcl", "LiDAR + 事前地図", "ROS2必須", "パーティクルフィルタで保存済み地図に対して自己位置推定"],
+      ["visual_slam (VSLAM)", "RealSense D435i", "ROS2 + Isaac ROS必須", "cuVSLAM(視覚慣性オドメトリ)。vio/mapping/localizeの3モード"],
+      ["aruco", "外部の俯瞰カメラ", "UDP受信のみ(ROS不要)", "天井/コース脇のカメラでARマーカーを検出し三角測量"],
+    ];
+    s.addTable(
+      [
+        ["バックエンド", "使用センサー", "必要環境", "方式"].map(t => ({
+          text: t, options: { bold: true, color: WHITE, fill: { color: NAVY }, fontSize: 10.5 },
+        })),
+        ...rows.map((r, i) => r.map((cell, ci) => ({
+          text: cell,
+          options: {
+            fill: { color: i % 2 ? CARD_BG : WHITE },
+            fontSize: 10, bold: ci === 0, color: ci === 0 ? ORANGE : TEXT_DARK,
+          },
+        }))),
+      ],
+      { x: 0.6, y: 2.5, w: 12.13, h: 2.9, fontFace: FONT_BODY, border: { type: "none" }, autoPage: false,
+        colW: [2.3, 2.5, 2.8, 4.53] }
+    );
+
+    s.addShape("roundRect", { x: 0.6, y: 5.7, w: 12.13, h: 0.95, rectRadius: 0.1, fill: { color: NAVY }, line: { type: "none" } });
+    s.addText([
+      { text: "💡 「map frame」と「odom frame」の違い： ", options: { bold: true, color: ORANGE, breakLine: true } },
+      { text: "aruco / lidar_slam / slam_toolbox は絶対座標(map)を返すが、VSLAM は単体では相対座標(odom)止まり。経路追従には絶対座標が必要なため、VSLAMは VSLAM_MODE=\"localize\" で使う。", options: { color: "C7CEDE" } },
+    ], {
+      x: 0.85, y: 5.82, w: 11.6, h: 0.75, fontFace: FONT_BODY, fontSize: 10.5, margin: 0, lineSpacingMultiple: 1.2,
+    });
+
+    pageNum(s, 12);
+  }
+
+  // =========================================================================
+  // Slide 13 — 経路追従・最適制御
+  // =========================================================================
+  {
+    const s = pres.addSlide();
+    s.background = { color: WHITE };
+    eyebrow(s, "13 / localization/ (path_nav / waypoint_nav / mpc / mppi)");
+    slideTitle(s, "経路追従 ― 自己位置を使って正確に走る");
+
+    s.addText("自己位置が分かれば、あらかじめ記録した経路や目標点に向かって走れる。シンプルな幾何学的追従から、数手先を予測する最適制御まで、精度と計算コストが異なる複数の方式がある。", {
+      x: 0.6, y: 1.75, w: 11.9, h: 0.6,
+      fontFace: FONT_BODY, fontSize: 13, color: TEXT_DARK, margin: 0, lineSpacingMultiple: 1.2,
+    });
+
+    const steps = [
+      { t: "path_nav / waypoint_nav", d: "pure pursuit法。記録した経路や目標点列へ、幾何学的に滑らかに追従する基本形。", color: CYAN_TINT },
+      { t: "mpc", d: "非線形モデル予測制御(iLQR)。数手先の動きまで計算し、path_navより精密に追従する上位互換。", color: STEEL_TINT },
+      { t: "mppi", d: "サンプリングベースの最適制御。経路追従に加え、LiDARで検知した障害物回避もコストに織り込む。", color: ORANGE_TINT },
+      { t: "mppi_local", d: "地図も自己位置も使わない発展形。LiDAR点群だけを見て、その場で開いた空間へ向かう。", color: NAVY, textWhite: true },
+    ];
+    const rowTop = 2.55, rowH = 1.05, rowW = 12.13, rowX = 0.6;
+    steps.forEach((st, i) => {
+      const y = rowTop + i * (rowH + 0.15);
+      s.addShape("roundRect", { x: rowX, y, w: rowW, h: rowH, rectRadius: 0.1, fill: { color: st.color }, line: { type: "none" } });
+      s.addText(`STEP ${i + 1}`, {
+        x: rowX + 0.3, y: y + 0.15, w: 1.6, h: 0.3, fontFace: FONT_BODY, fontSize: 9.5, bold: true,
+        color: st.textWhite ? ORANGE : ORANGE, margin: 0, charSpacing: 1,
+      });
+      s.addText(st.t, {
+        x: rowX + 0.3, y: y + 0.42, w: 3.2, h: 0.5, fontFace: FONT_HEAD, fontSize: 15, bold: true,
+        color: st.textWhite ? WHITE : TEXT_DARK, margin: 0,
+      });
+      s.addText(st.d, {
+        x: rowX + 3.7, y, w: rowW - 4.0, h: rowH, valign: "middle", fontFace: FONT_BODY, fontSize: 11,
+        color: st.textWhite ? "C7CEDE" : MUTED, margin: 0, lineSpacingMultiple: 1.2,
+      });
+      if (i < steps.length - 1) {
+        s.addText("↓", { x: rowX, y: y + rowH, w: 1.2, h: 0.15, align: "center", fontFace: FONT_BODY, fontSize: 11, color: MUTED, margin: 0 });
+      }
+    });
+
+    pageNum(s, 13);
+  }
+
+  // =========================================================================
+  // Slide 14 — YOLOによる物体検知
+  // =========================================================================
+  {
+    const s = pres.addSlide();
+    s.background = { color: WHITE };
+    eyebrow(s, "14 / yolo_detection.py");
+    slideTitle(s, "YOLO ― カメラで物体を見分ける");
+
+    s.addText("カメラ画像に写る物体(標識・障害物など)をYOLOで検知し、結果を3つの方法で走行に活かす。config.py の USE_YOLO_* フラグで個別にON/OFFできる。", {
+      x: 0.6, y: 1.75, w: 11.9, h: 0.55,
+      fontFace: FONT_BODY, fontSize: 13, color: TEXT_DARK, margin: 0, lineSpacingMultiple: 1.2,
+    });
+
+    const uses = [
+      { t: "ルールで操作を上書き", d: "検知したクラスに応じて、あらかじめ決めたステアリング補正・減速ルールを適用する(例: 停止標識を見たら減速)。", ic: icon.sliders_navy, color: CYAN_TINT },
+      { t: "モデルを自動で切替", d: "検知した物体の種類に応じて、使用する走行モデル自体を切り替える。計算負荷を抑えるため数フレームに1回だけ実行。", ic: icon.brain_navy, color: ORANGE_TINT },
+      { t: "物体追従・回避", d: "検知した箱(バウンディングボックス)の画面中心からのズレに応じて、比例制御でステアリングを補正する。", ic: icon.crosshairs_navy, color: STEEL_TINT },
+    ];
+    const cardW = 3.75, gap = 0.35, top = 2.65, cardH = 3.5;
+    const left = (13.333 - (3 * cardW + 2 * gap)) / 2;
+    uses.forEach((u, i) => {
+      const x = left + i * (cardW + gap);
+      s.addShape("roundRect", { x, y: top, w: cardW, h: cardH, rectRadius: 0.12, fill: { color: CARD_BG }, line: { type: "none" } });
+      iconCircle(s, u.ic, x + cardW / 2, top + 0.85, 1.05, u.color);
+      s.addText(`0${i + 1}  ${u.t}`, {
+        x: x + 0.25, y: top + 1.55, w: cardW - 0.5, h: 0.55, align: "center",
+        fontFace: FONT_HEAD, fontSize: 14, bold: true, color: TEXT_DARK, margin: 0, lineSpacingMultiple: 1.05,
+      });
+      s.addText(u.d, {
+        x: x + 0.3, y: top + 2.15, w: cardW - 0.6, h: 1.2, align: "center",
+        fontFace: FONT_BODY, fontSize: 10.5, color: MUTED, margin: 0, lineSpacingMultiple: 1.25,
+      });
+    });
+
+    s.addShape("roundRect", { x: left, y: top + cardH + 0.25, w: 3 * cardW + 2 * gap, h: 0.5, rectRadius: 0.08, fill: { color: CARD_BG }, line: { type: "none" } });
+    s.addText("💡 yolo11n〜yolo11x はモデルサイズの違い(nが最速・軽量、xが最高精度・低速)", {
+      x: left + 0.25, y: top + cardH + 0.25, w: 3 * cardW + 2 * gap - 0.5, h: 0.5, valign: "middle",
+      fontFace: FONT_BODY, fontSize: 10.5, color: TEXT_DARK, margin: 0,
+    });
+
+    pageNum(s, 14);
+  }
+
+  // =========================================================================
+  // Slide 15 — ControlArbiter(安全弁)
+  // =========================================================================
+  {
+    const s = pres.addSlide();
+    s.background = { color: WHITE };
+    eyebrow(s, "15 / arbiter.py");
+    slideTitle(s, "ControlArbiter ― 判断を二重チェックする安全弁");
+
+    s.addText("planner.py が出した判断(steering, throttle)を、状況に応じて上書きできる「安全弁」。planner.py の内部から毎フレーム呼び出される、走行ロジックの裏方。", {
+      x: 0.6, y: 1.75, w: 11.9, h: 0.55,
+      fontFace: FONT_BODY, fontSize: 13, color: TEXT_DARK, margin: 0, lineSpacingMultiple: 1.2,
+    });
+
+    // flow: planner -> arbiter -> motor with branch conditions
+    const fx = 0.6, fw = 5.4, fTop = 2.6;
+    const box = (y, h, text, fill, textColor) => {
+      s.addShape("roundRect", { x: fx, y, w: fw, h, rectRadius: 0.08, fill: { color: fill }, line: { type: "none" } });
+      s.addText(text, { x: fx + 0.25, y, w: fw - 0.5, h, valign: "middle", align: "center", fontFace: FONT_BODY, fontSize: 12.5, bold: true, color: textColor, margin: 0 });
+    };
+    box(fTop, 0.6, "planner.py が主判断(steering, throttle)を計算", NAVY, WHITE);
+    s.addText("↓", { x: fx, y: fTop + 0.6, w: fw, h: 0.3, align: "center", fontFace: FONT_BODY, fontSize: 16, color: MUTED, margin: 0 });
+    box(fTop + 0.9, 0.6, "ControlArbiter.arbitrate()", ORANGE, WHITE);
+    s.addText("↓", { x: fx, y: fTop + 1.5, w: fw, h: 0.3, align: "center", fontFace: FONT_BODY, fontSize: 16, color: MUTED, margin: 0 });
+    box(fTop + 1.8, 0.6, "motor.py へ出力(必要なら上書き済み)", STEEL, WHITE);
+
+    s.addText("3つの発動モード(ARBITER_MODE)", {
+      x: 6.7, y: 2.5, w: 6.0, h: 0.35, fontFace: FONT_HEAD, fontSize: 14, bold: true, color: TEXT_DARK, margin: 0,
+    });
+    const modes = [
+      { t: "fallback", d: "自己位置推定の信頼度が下がったら、副プラン(例: カメラCNN)へ自動切替", color: CYAN_TINT },
+      { t: "events", d: "経路からのズレを監視し、逸脱していたら副プランへ切替、または緊急停止", color: ORANGE_TINT },
+      { t: "obstacle", d: "LiDARが前方の狭い範囲に障害物を検知したら副プラン(例: ローカルMPPI回避)へ切替。ただし直進に近い時のみ判定し、コーナリング中の誤反応を避ける", color: STEEL_TINT },
+    ];
+    modes.forEach((m, i) => {
+      const y = 2.95 + i * 1.15;
+      s.addShape("roundRect", { x: 6.7, y, w: 6.03, h: 1.0, rectRadius: 0.08, fill: { color: m.color }, line: { type: "none" } });
+      s.addText(m.t, { x: 6.95, y: y + 0.1, w: 5.5, h: 0.3, fontFace: FONT_HEAD, fontSize: 12.5, bold: true, color: TEXT_DARK, margin: 0 });
+      s.addText(m.d, { x: 6.95, y: y + 0.42, w: 5.5, h: 0.5, fontFace: FONT_BODY, fontSize: 9.8, color: MUTED, margin: 0, lineSpacingMultiple: 1.15 });
+    });
+
+    pageNum(s, 15);
+  }
+
+  // =========================================================================
+  // Slide 16 — 強化学習シミュレーター
+  // =========================================================================
+  {
+    const s = pres.addSlide();
+    s.background = { color: WHITE };
+    eyebrow(s, "16 / togikaidrive-sim/");
+    slideTitle(s, "togikaidrive-sim ― シミュレーターでAIを鍛える");
+
+    s.addText("実車を使わず、f1tenth_gym(レーシングシミュレーター)上でAIに運転を学習させる、研究レベルの高度な機能。plan=\"rl\" で学習済みポリシーを実車に読み込める。", {
+      x: 0.6, y: 1.75, w: 11.9, h: 0.55,
+      fontFace: FONT_BODY, fontSize: 13, color: TEXT_DARK, margin: 0, lineSpacingMultiple: 1.2,
+    });
+
+    const flow = [
+      { n: "1", t: "デモ収集", d: "collect_demos.py\nルールベースplannerが\nシミュレーター内で走行", ic: icon.gamepad_navy, color: CYAN_TINT },
+      { n: "2", t: "事前学習", d: "pretrain_bc.py\n模倣学習(Behavioral\nCloning)で土台を作る", ic: icon.database_navy, color: STEEL_TINT },
+      { n: "3", t: "強化学習", d: "train_rl.py\nSAC/PPO/TD3で\nポリシーを磨き込む", ic: icon.brain_navy, color: ORANGE_TINT },
+      { n: "4", t: "実車で使用", d: "enjoy_rl.py で評価、\nplan=\"rl\" で実車に\n読み込んで走行", ic: icon.rocket_white, color: CYAN_TINT },
+    ];
+    const cardW = 2.75, gap = 0.35, top = 2.6, cardH = 3.1;
+    const left = (13.333 - (4 * cardW + 3 * gap)) / 2;
+    flow.forEach((f, i) => {
+      const x = left + i * (cardW + gap);
+      s.addShape("roundRect", { x, y: top, w: cardW, h: cardH, rectRadius: 0.12, fill: { color: CARD_BG }, line: { type: "none" } });
+      s.addShape("ellipse", { x: x + 0.15, y: top + 0.15, w: 0.4, h: 0.4, fill: { color: ORANGE }, line: { type: "none" } });
+      s.addText(f.n, { x: x + 0.15, y: top + 0.15, w: 0.4, h: 0.4, align: "center", valign: "middle", fontFace: FONT_BODY, fontSize: 12, bold: true, color: WHITE, margin: 0 });
+      iconCircle(s, f.ic, x + cardW / 2, top + 1.15, 0.95, f.color);
+      s.addText(f.t, { x: x + 0.2, y: top + 1.75, w: cardW - 0.4, h: 0.35, align: "center", fontFace: FONT_HEAD, fontSize: 14, bold: true, color: TEXT_DARK, margin: 0 });
+      s.addText(f.d, { x: x + 0.2, y: top + 2.12, w: cardW - 0.4, h: 0.85, align: "center", fontFace: FONT_BODY, fontSize: 9.5, color: MUTED, margin: 0, lineSpacingMultiple: 1.15 });
+      if (i < flow.length - 1) {
+        s.addText("→", { x: x + cardW + 0.02, y: top + cardH / 2 - 0.3, w: gap - 0.04, h: 0.6, align: "center", valign: "middle", fontFace: FONT_BODY, fontSize: 20, bold: true, color: MUTED, margin: 0 });
+      }
+    });
+
+    s.addShape("roundRect", { x: left, y: top + cardH + 0.3, w: 4 * cardW + 3 * gap, h: 0.55, rectRadius: 0.08, fill: { color: NAVY }, line: { type: "none" } });
+    s.addText("💡 観測はLiDAR108本(ダウンサンプリング済み)+速度の計109次元ベクトル。実車と同じLiDAR構成なら、シムで学習したポリシーがそのまま活きる", {
+      x: left + 0.25, y: top + cardH + 0.3, w: 4 * cardW + 3 * gap - 0.5, h: 0.55, valign: "middle",
+      fontFace: FONT_BODY, fontSize: 10, color: "C7CEDE", margin: 0,
+    });
+
+    pageNum(s, 16);
+  }
+
+  // =========================================================================
+  // Slide 17 — まとめ
   // =========================================================================
   {
     const s = pres.addSlide();
@@ -848,7 +1140,7 @@ async function main() {
       fontFace: FONT_BODY, fontSize: 12.5, margin: 0,
     });
 
-    pageNum(s, 11, STEEL_SOFT);
+    pageNum(s, 17, STEEL_SOFT);
   }
 
   await pres.writeFile({ fileName: "togikaidrive_overview.pptx" });

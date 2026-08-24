@@ -4,10 +4,12 @@
 
 ## ファイル
 
-- `togikaidrive_overview.pptx` — 完成したスライド資料（全11枚）
+- `togikaidrive_overview.pptx` — 完成したスライド資料（全17枚）
 - `build.js` — スライドを生成する pptxgenjs スクリプト（再生成・編集用）
 
 ## スライド構成
+
+### 基本編（1〜10）
 
 1. タイトル
 2. 全体像（1枚で分かる認知→判断→操作の3ステップ）
@@ -19,7 +21,21 @@
 8. planner.py（判断ロジック）
 9. motor.py（PWM変換）
 10. train_pytorch.py + data_viewer（学習の流れ）
-11. まとめ
+
+### 高度な機能編（11〜16）
+
+config.py の473設定項目のうち、基本編でカバーしているのは15〜20%程度。残りの本格的なレース競技向け機能を解説。
+
+11. 高度な機能マップ（5ジャンルの概観）
+12. 自己位置推定（lidar_slam / slam_toolbox / AMCL / VSLAM / ArUco の比較）
+13. 経路追従・最適制御（path_nav → mpc → mppi → mppi_local の段階）
+14. YOLOによる物体検知（yolo_detection.py の3つの使い道）
+15. ControlArbiter（判断を上書きする安全弁、fallback/events/obstacleの3モード）
+16. 強化学習シミュレーター（togikaidrive-sim、f1tenth_gymベースのRL学習パイプライン）
+
+### まとめ
+
+17. まとめ
 
 ## 再生成・編集する場合
 
