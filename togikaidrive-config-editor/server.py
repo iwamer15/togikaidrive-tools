@@ -64,6 +64,90 @@ CATEGORIES = [
 ]
 
 # ---------------------------------------------------------------------------
+# 走行モード(PLAN)の解説データ
+# PLAN_LIST は40種類以上あるが、処理内容ベースでいくつかの「系統」にまとめ、
+# 個別に説明が必要なもの(ルールベース・ナビゲーション系)だけ単独エントリにする。
+# 画像認識系(donkeycar/resnet18/mobilevit_*等)は処理の流れが共通なので1系統にまとめる。
+# ---------------------------------------------------------------------------
+_PLAN_SINGLE = {
+    "manual": dict(category="手動", input="コントローラー", summary="人がジョイスティック/プロポ/キーボードで直接操作する。学習用データを集めるときの基本モード。",
+                   files=["joystick.py", "pwm_controller.py"]),
+    "go_straight": dict(category="ルールベース", input="なし", summary="判断ロジックを持たず、常にまっすぐ走るだけ。モーターやセンサーの動作確認用。",
+                         files=["planner.py"]),
+    "right_left_3": dict(category="ルールベース", input="超音波/LiDAR(左前・正面・右前)", summary="正面に障害物が近づいたら、左右どちらのセンサーがより開けているかを比べ、開けている側へ曲がる。",
+                          files=["planner.py: Planner.right_left_3()"]),
+    "right_left_3_records": dict(category="ルールベース", input="超音波/LiDAR + 過去の操作履歴", summary="right_left_3と同じ判断に加え、直近の操作を記録・参照して同じ方向に曲がり続けないよう調整する版。",
+                                  files=["planner.py: Planner.right_left_3_records()"]),
+    "wall_follow": dict(category="ルールベース", input="超音波/LiDAR(側面)", summary="片側の壁との距離が目標値(TARGET_RANGE)に近づくよう、単純な比例制御でステアリングを調整しながら壁沿いを走る。",
+                         files=["planner.py: Planner.wall_follow()"]),
+    "wall_follow_pid": dict(category="ルールベース(PID)", input="超音波/LiDAR(側面)", summary="wall_followと同じ目的だが、PID制御(比例・積分・微分)を使うことで、より滑らかで安定した壁沿い走行になる。",
+                             files=["planner.py: Planner.wall_follow_pid()"]),
+    "follow_the_gap": dict(category="ルールベース(反応型)", input="LiDAR(全点群)", summary="LiDARの点群から、障害物を避けた上で「一番広く開いている角度」を毎フレーム計算し、その方向へ走る回避アルゴリズム。",
+                            files=["follow_the_gap.py"]),
+    "rl": dict(category="強化学習", input="LiDAR(109次元の観測ベクトル)", summary="togikaidrive-sim(シミュレーター)上で強化学習(SAC/PPO/TD3等)を使って事前に学習させたポリシーで走行する。",
+               files=["togikaidrive-sim/enjoy_rl.py", "togikaidrive-sim/run_f1tenth.py"]),
+    "path_nav": dict(category="自己位置+経路追従", input="自己位置推定(SLAM/VSLAM/ArUco) + 記録済み経路", summary="自分の位置と向きを推定しながら、あらかじめ記録した経路(centerline/raceline)をpure pursuit法で追従する。",
+                      files=["localization/path_follow.py"]),
+    "waypoint_nav": dict(category="自己位置+目標点ナビ", input="自己位置推定 + 目標点リスト", summary="指定した座標(目標点)へ順番に向かって走る。到達時の挙動(停止/ループ/折り返し)も設定できる。",
+                          files=["localization/waypoint_nav.py"]),
+    "mpc": dict(category="自己位置+最適制御", input="自己位置推定 + 記録済み経路", summary="非線形モデル予測制御(iLQR)を使い、数手先の動きまで計算しながら経路に追従する、path_navの上位互換。",
+                files=["localization/mpc_follow.py"]),
+    "mppi": dict(category="自己位置+最適制御", input="自己位置推定 + 記録済み経路 + LiDAR", summary="サンプリングベースの最適制御(MPPI)で経路に追従しつつ、LiDARで検知した障害物も避けるようコストに織り込む。",
+                 files=["localization/mppi_follow.py", "localization/mppi_core.py"]),
+    "mppi_local": dict(category="ローカル最適制御", input="LiDAR(全点群のみ)", summary="地図や自己位置を使わず、その場のLiDAR点群だけを見て、開いた空間へ向かうMPPI制御を行う(follow_the_gapの発展版)。",
+                        files=["localization/mppi_local.py"]),
+    "ai_model": dict(category="AI(自動判別・推奨)", input="学習済みモデルによる", summary="学習済みモデルファイルの中身を読み取り、CNN画像モデル/系列モデル/超音波NNなどを自動で判別して使う。新規に学習する場合はこれを推奨。",
+                      files=["model_inference.py", "run.py: _detect_ai_model_kind()"]),
+    "nn": dict(category="AI(センサー値)", input="超音波センサーの値", summary="超音波センサーの値を入力にしたシンプルなニューラルネットワークで、ステアリング/スロットルを推論する(旧式。新規はai_model推奨)。",
+               files=["train_pytorch.py"]),
+}
+
+_IMAGE_FAMILY = dict(
+    category="AI(画像CNN/Transformer)", input="カメラ画像",
+    summary="カメラ画像を入力に、AIモデルでステアリング/スロットルを推論する。処理の流れ(画像→AI推論→操作値)はどれも共通で、違いはニューラルネットの構造(精度と速度のトレードオフ)。donkeycarが標準的な軽量モデル、resnet18/34やswin系はより高精度、mobilevit/mobilenet/efficientnet/edgenext/ghostnet系は軽量・高速志向。",
+    files=["train_pytorch.py", "annotation_training_d2j (モデル定義)"],
+)
+_IMAGE_PLANS = [
+    "donkeycar", "donkey_fcn", "resnet18", "resnet34",
+    "mobilevit_xxs", "mobilevit_xs", "mobilevit_s", "mobilevitv2_050",
+    "mobilenetv3_small_100", "mobilenetv3_large_100", "mobilenetv4_conv_small",
+    "efficientnet_lite0", "efficientnet_b0", "efficientnetv2_s",
+    "convnext_nano", "convnext_tiny", "edgenext_xx_small", "edgenext_x_small",
+    "mobileone_s0", "ghostnet_050", "shufflenetv2_x0_5",
+    "swin_tiny_patch4_window7_224", "swin_tiny", "swin_s3_tiny_224",
+    "swinv2_cr_tiny_ns_224", "swin_moe_tiny_patch4_window7_224", "efficientformer_l1",
+]
+
+_YOLO_FAMILY = dict(
+    category="AI(物体検知ベース)", input="カメラ画像(YOLOで物体検知)",
+    summary="YOLOで検知した物体(標識・障害物など)の種類や位置に応じて、あらかじめ決めたルールで減速・回避・モデル切り替えを行う。n/s/m/l/xはモデルサイズの違い(小さいほど高速、大きいほど高精度)。",
+    files=["yolo_detection.py"],
+)
+_YOLO_PLANS = ["yolo11n", "yolo11s", "yolo11m", "yolo11l", "yolo11x"]
+
+_SEQUENCE_FAMILY = dict(
+    category="AI(時系列モデル)", input="直近数フレーム分のセンサー値/画像特徴の推移",
+    summary="1枚の画像・1回のセンサー値だけでなく、直近数フレームの「流れ」を考慮して推論するモデル。急なコーナーの手前の動きなど、時間的な文脈が重要な場面に強い。",
+    files=["train_pytorch.py: load_sequence_model()"],
+)
+_SEQUENCE_PLANS = ["gru", "tcn", "causal_cnn"]
+
+
+def build_plan_info() -> dict:
+    info = dict(_PLAN_SINGLE)
+    for p in _IMAGE_PLANS:
+        info[p] = _IMAGE_FAMILY
+    for p in _YOLO_PLANS:
+        info[p] = _YOLO_FAMILY
+    for p in _SEQUENCE_PLANS:
+        info[p] = _SEQUENCE_FAMILY
+    return info
+
+
+PLAN_INFO = build_plan_info()
+_PLAN_INFO_FALLBACK = dict(category="詳細未整理", input="-", summary="このモードの解説はまだ用意されていません。planner.py の該当メソッドを確認してください。", files=[])
+
+# ---------------------------------------------------------------------------
 # config.py の読み書き
 # ---------------------------------------------------------------------------
 def _line_pattern(key: str) -> re.Pattern:
@@ -228,7 +312,8 @@ def render_field(field: dict, value, plan_groups) -> str:
                 for o in group["options"]
             )
             options_html += f'<optgroup label="{group["group"]}">{opts}</optgroup>'
-        control = f'<select name="{key}" data-kind="select">{options_html}</select>'
+        control = (f'<select name="{key}" data-kind="select" onchange="updatePlanInfo(this.value)">{options_html}</select>'
+                   f'<div id="plan-info" class="plan-info"></div>')
     elif kind == "sensors":
         current = set(value or [])
         boxes = "".join(
@@ -280,7 +365,16 @@ def render_page() -> str:
           <div class="card-body" style="border-color:{accent}22">{fields_html}</div>
         </section>'''
 
-    return HTML_SHELL.replace("__CARDS__", cards).replace("__CONFIG_PATH__", str(CONFIG_PATH))
+    plan_info_json = json.dumps(PLAN_INFO, ensure_ascii=False)
+    plan_fallback_json = json.dumps(_PLAN_INFO_FALLBACK, ensure_ascii=False)
+    return (
+        HTML_SHELL
+        .replace("__CARDS__", cards)
+        .replace("__CONFIG_PATH__", str(CONFIG_PATH))
+        .replace("__PLAN_INFO__", plan_info_json)
+        .replace("__PLAN_FALLBACK__", plan_fallback_json)
+        .replace("__PLAN_CURRENT__", json.dumps(values.get("PLAN")))
+    )
 
 
 HTML_SHELL = f'''<!doctype html>
@@ -334,6 +428,23 @@ HTML_SHELL = f'''<!doctype html>
   .chk {{ display: flex; align-items: center; gap: 0.4rem; font-size: 0.88rem; background: #FBFBFD;
     border: 1px solid #D8DCE6; padding: 0.4rem 0.65rem; border-radius: 8px; cursor: pointer; }}
   .chk input {{ accent-color: var(--cyan); }}
+  .plan-info {{
+    margin-top: 0.7rem; background: var(--card-bg); border-radius: 10px; padding: 0.8rem 0.9rem;
+    font-size: 0.83rem; line-height: 1.5;
+  }}
+  .plan-info .badges {{ display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.5rem; }}
+  .plan-info .badge {{
+    display: inline-block; padding: 0.2rem 0.55rem; border-radius: 999px; font-size: 0.72rem;
+    font-weight: 700;
+  }}
+  .plan-info .badge.category {{ background: var(--orange); color: #fff; }}
+  .plan-info .badge.input {{ background: var(--steel); color: #fff; }}
+  .plan-info .summary {{ color: var(--text-dark); margin: 0 0 0.4rem; }}
+  .plan-info .files {{ margin: 0; color: var(--muted); font-size: 0.76rem; }}
+  .plan-info .files code {{
+    background: #fff; border: 1px solid #E4E7F0; border-radius: 5px; padding: 0.05rem 0.35rem;
+    font-size: 0.72rem;
+  }}
   .savebar {{
     position: fixed; left: 0; right: 0; bottom: 0; background: #fff;
     border-top: 1px solid #E4E7F0; padding: 0.9rem 1.2rem; display: flex; align-items: center;
@@ -371,6 +482,28 @@ __CARDS__
   <button id="save">変更を保存</button>
 </div>
 <script>
+const PLAN_INFO = __PLAN_INFO__;
+const PLAN_FALLBACK = __PLAN_FALLBACK__;
+
+function updatePlanInfo(planValue) {{
+  const panel = document.getElementById('plan-info');
+  if (!panel) return;
+  const info = PLAN_INFO[planValue] || PLAN_FALLBACK;
+  const filesHtml = (info.files && info.files.length)
+    ? '関連プログラム: ' + info.files.map(f => `<code>${{f}}</code>`).join(' ')
+    : '';
+  panel.innerHTML = `
+    <div class="badges">
+      <span class="badge category">${{info.category}}</span>
+      <span class="badge input">入力: ${{info.input}}</span>
+    </div>
+    <p class="summary">${{info.summary}}</p>
+    <p class="files">${{filesHtml}}</p>
+  `;
+}}
+
+document.addEventListener('DOMContentLoaded', () => updatePlanInfo(__PLAN_CURRENT__));
+
 function collectValues() {{
   const values = {{}};
   document.querySelectorAll('[data-kind]').forEach(el => {{
