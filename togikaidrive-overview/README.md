@@ -1,6 +1,6 @@
 # togikaidrive-dev 解説スライド
 
-`../../togikaidrive-dev`（外部リポジトリ [autonomous-minicar-battle/togikaidrive-dev](https://github.com/autonomous-minicar-battle/togikaidrive-dev) のクローン）の内容を、プログラムが分からない人にも分かるように解説したスライド資料。
+`../togikaidrive-dev`（外部リポジトリ [autonomous-minicar-battle/togikaidrive-dev](https://github.com/autonomous-minicar-battle/togikaidrive-dev) のクローン）の内容を、プログラムが分からない人にも分かるように解説したスライド資料。
 
 ## ファイル
 
@@ -40,7 +40,7 @@ config.py の473設定項目のうち、基本編でカバーしているのは1
 ## 再生成・編集する場合
 
 ```bash
-cd docs/togikaidrive-overview
+cd ト技会-minicar/togikaidrive-overview
 npm install
 node build.js
 # → togikaidrive_overview.pptx が上書き生成される
@@ -50,4 +50,4 @@ node build.js
 
 ## 注意
 
-`togikaidrive-dev/` は外部組織のリポジトリをクローンしたものなので、このスライド資料や関連ファイルは `docs/togikaidrive-overview/`（このリポジトリ側）に置き、`togikaidrive-dev/` 配下には手を加えない方針。
+`togikaidrive-dev/`（同じ `ト技会-minicar/` 直下）は外部組織のリポジトリをクローンしたものなので、このスライド資料や関連ファイルは `togikaidrive-overview/`（このリポジトリ側）に置き、`togikaidrive-dev/` 配下には手を加えない方針。

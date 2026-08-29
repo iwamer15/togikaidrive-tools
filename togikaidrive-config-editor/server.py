@@ -2,12 +2,16 @@
 """
 togikaidrive 設定エディタ
 ==========================
-config.py の中から、機械学習チュートリアルで触ることが多い項目だけを抜き出し、
-ブラウザの入力フォームから安全に編集できるようにするローカルツール。
+config.py(480項目・1281行の生Pythonファイル)を、ミニカーの処理カテゴリ別の
+パネルUIから安全に編集できるようにするローカルツール。
 
 - 標準ライブラリのみで動作(pip install不要。Raspberry Pi / Jetson でもそのまま動く)
 - config.py の該当行だけを書き換える(ファイル全体を作り直さない)
 - 保存前に必ずバックアップ(config.py.bak.<日時>)を作成する
+- 「よく使う設定」はカード形式+説明文、それ以外の全項目は「詳細設定」として
+  config.py自身のセクション見出しからその場で自動生成する(ハードコードしない)
+- どちらの階層でも、保存前に「config.pyの何行目がどう変わるか」を
+  差分プレビュー(変更前→変更後)で確認できる
 
 使い方:
     python3 server.py
@@ -27,44 +31,166 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 PORT = 8899
-CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "togikaidrive-dev" / "config.py"
+# togikaidrive-config-editor/ と togikaidrive-dev/ は ト技会-minicar/ 直下の兄弟フォルダ
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "togikaidrive-dev" / "config.py"
 
 # ---------------------------------------------------------------------------
-# フィールド定義（ここに追加すればフォームにも自動で増える）
+# ミニカー処理カテゴリ(6分類)
+# config.py 自身が持つ33個のセクション見出しを実際に集計し、この6分類に
+# 自然にまとまることを確認済み(SECTION_CATEGORY で対応づけ)。
 # ---------------------------------------------------------------------------
-FIELDS = [
-    # --- データ収集 ---
-    dict(key="PLAN", category="collect", kind="select", label="走行モード (PLAN)",
-         help="データを集める/走らせるときのモード。手動でデータ収集するなら manual、学習済みAIで走らせるなら ai_model。"),
-    dict(key="ACTIVE_SENSORS", category="collect", kind="sensors", label="使用センサー (ACTIVE_SENSORS)",
-         help="学習に使うデータを取るセンサーを選ぶ。カメラ画像で学習するなら camera_0 を含める。"),
-    dict(key="_car_diagram", category="collect", kind="diagram", label="センサー配置図",
-         help="色つき=選択中のセンサー。オレンジの輪=上で選んだ走行モード(PLAN)が使うセンサー。"),
-    dict(key="FORWARD_STRAIGHT", category="collect", kind="float", min=-1, max=1, step=0.05, label="直線速度 (FORWARD_STRAIGHT)",
-         help="データ収集・手動走行時のまっすぐ進む速さ。0〜1の範囲が目安。"),
-    dict(key="FORWARD_CORNER", category="collect", kind="float", min=-1, max=1, step=0.05, label="カーブ速度 (FORWARD_CORNER)",
-         help="データ収集・手動走行時のカーブでの速さ。直線速度より少し小さめが目安。"),
-    # --- 学習パラメータ ---
-    dict(key="EPOCHS", category="train", kind="int", min=1, max=500, label="学習回数 (EPOCHS)",
-         help="集めたデータを何周学習させるか。多いほど学習は進むが時間もかかる。まずは30前後が目安。"),
-    dict(key="BATCH_SIZE", category="train", kind="int", min=1, max=512, label="バッチサイズ (BATCH_SIZE)",
-         help="1回の学習ステップで同時に見せるデータ数。大きいほど学習は安定するが、メモリを多く使う。"),
-    dict(key="HIDDEN_DIM", category="train", kind="int", min=1, max=1024, label="隠れ層の大きさ (HIDDEN_DIM)",
-         help="ニューラルネットの1層あたりのノード数。大きいほど複雑な運転を学習できるが、過学習しやすくなる。"),
-    dict(key="NUM_HIDDEN_LAYERS", category="train", kind="int", min=1, max=20, label="隠れ層の数 (NUM_HIDDEN_LAYERS)",
-         help="ニューラルネットの層の深さ。基本は2〜3層で十分。"),
-    # --- モデル指定 ---
-    dict(key="MODEL_DIR", category="model", kind="str", label="モデル保存フォルダ (MODEL_DIR)",
-         help="学習済みモデルを保存・読み込みするフォルダ名。通常は変更不要。"),
-    dict(key="MODEL_NAME", category="model", kind="str", label="使用するモデルファイル名 (MODEL_NAME)",
-         help="自動走行時に読み込む学習済みモデルのファイル名。train_pytorch.py の実行後に表示される名前をここに入れる。"),
-]
-
 CATEGORIES = [
-    dict(id="collect", title="データ収集", subtitle="1. 走行モードとセンサーを決めて、手動でデータを集める", icon="📡", accent="cyan"),
-    dict(id="train", title="学習パラメータ", subtitle="2. train_pytorch.py で学習させる時の設定", icon="🧠", accent="orange"),
-    dict(id="model", title="モデル指定", subtitle="3. 学習済みモデルを自動走行で使う", icon="🤖", accent="steel"),
+    dict(id="basic", title="基本設定", subtitle="デバイス・モニター・記録形式など", icon="🔧", accent="steel"),
+    dict(id="perception", title="認知", subtitle="超音波・カメラ・LiDAR・IMU等のセンサー設定", icon="📡", accent="cyan"),
+    dict(id="localization", title="自己位置推定", subtitle="SLAM / VSLAM / ArUco / AMCL（高度・任意）", icon="🧭", accent="cyan"),
+    dict(id="decision", title="判断", subtitle="走行モード(PLAN)・AIモデル・走行ロジック", icon="🧠", accent="orange"),
+    dict(id="control", title="操作", subtitle="モーター校正・コントローラー設定", icon="⚙️", accent="steel"),
+    dict(id="fx", title="演出", subtitle="エンジン音など見た目・体験の演出", icon="🔊", accent="orange"),
 ]
+CATEGORY_IDS = {c["id"] for c in CATEGORIES}
+
+# ---------------------------------------------------------------------------
+# よく使う設定(キュレーション。手作業で選定し、説明文をつけた項目)
+# ---------------------------------------------------------------------------
+CURATED_FIELDS = [
+    # ============================== 基本設定 ==============================
+    dict(key="MONITOR", category="basic", kind="bool", label="Webモニターを使う (MONITOR)",
+         help="走行中の状態をブラウザ(http://<IP>:8000等)でリアルタイム確認できるようにする。"),
+    dict(key="TERMINAL_PRINT", category="basic", kind="bool", label="ターミナル出力 (TERMINAL_PRINT)",
+         help="走行中の状態をターミナルにも表示するか。"),
+    dict(key="SAVE_FORMAT", category="basic", kind="choice", options=["csv", "ndjson", "donkeycar"],
+         label="記録形式 (SAVE_FORMAT)", help="走行データの保存形式。data_viewer等で使うなら donkeycar。"),
+    dict(key="AUTO_ZIP_ON_EXIT", category="basic", kind="bool", label="終了時に自動zip (AUTO_ZIP_ON_EXIT)",
+         help="run.py終了時に記録フォルダを自動的にzip圧縮するか。"),
+
+    # ============================== 認知 ==============================
+    dict(key="ACTIVE_SENSORS", category="perception", kind="sensors", label="使用センサー (ACTIVE_SENSORS)",
+         help="実際に使うセンサーを選ぶ。カメラ画像で学習するなら camera_0 を含める。"),
+    dict(key="_car_diagram", category="perception", kind="diagram", label="センサー配置図",
+         help="色つき=選択中のセンサー。オレンジの輪=「判断」カテゴリで選んだ走行モード(PLAN)が使うセンサー。"),
+    dict(key="STOP_RANGE", category="perception", kind="int", min=0, max=2000, label="停止判定距離 (STOP_RANGE, mm)",
+         help="この距離より障害物が近づいたら停止・後退の判断に使う。"),
+    dict(key="DETECTION_RANGE", category="perception", kind="int", min=0, max=4000, label="検知開始距離 (DETECTION_RANGE, mm)",
+         help="この距離から障害物として検知を始める。"),
+    dict(key="IMAGE_W", category="perception", kind="int", min=32, max=1920, label="カメラ画像の幅 (IMAGE_W)",
+         help="カメラ画像の横ピクセル数。学習モデルの入力サイズに合わせる(通常224)。"),
+    dict(key="IMAGE_H", category="perception", kind="int", min=32, max=1080, label="カメラ画像の高さ (IMAGE_H)",
+         help="カメラ画像の縦ピクセル数。"),
+    dict(key="LIDAR_TYPE", category="perception", kind="choice", options=["AUTO", "TMINI", "UST20", "NONE"],
+         label="LiDAR機種 (LIDAR_TYPE)", help="AUTOなら起動時に自動検出する。"),
+
+    # ============================== 自己位置推定 ==============================
+    dict(key="LIDAR_SLAM_BACKEND", category="localization", kind="choice",
+         options=["none", "lidar_slam", "slam_toolbox", "amcl"],
+         label="SLAMバックエンド (LIDAR_SLAM_BACKEND)",
+         help="LiDARベースの自己位置推定方式。none=使わない。詳細は詳細設定またはスライド資料を参照。"),
+    dict(key="LOCALIZATION_SOURCE", category="localization", kind="choice",
+         options=["lidar_slam", "vslam", "aruco"],
+         label="経路追従用の自己位置ソース (LOCALIZATION_SOURCE)",
+         help="path_nav/waypoint_nav/mpc/mppi等が使う自己位置推定の情報源。"),
+
+    # ============================== 判断 ==============================
+    dict(key="PLAN", category="decision", kind="select", label="走行モード (PLAN)",
+         help="判断ロジックの種類。手動でデータ収集するなら manual、学習済みAIで走らせるなら ai_model。"),
+    dict(key="HAND_SIDE", category="decision", kind="choice", options=["right", "left"],
+         label="壁沿い走行の基準側 (HAND_SIDE)", help="wall_follow系モードで、右手法/左手法どちらを使うか。"),
+    dict(key="TARGET_RANGE", category="decision", kind="int", min=0, max=2000, label="壁との目標距離 (TARGET_RANGE, mm)",
+         help="wall_follow系モードで維持しようとする壁との距離。"),
+    dict(key="K_P", category="decision", kind="float", min=0, max=10, step=0.001, label="PID比例ゲイン (K_P)",
+         help="壁沿い走行PID制御の比例項。大きいほど反応が敏感になる。"),
+    dict(key="K_I", category="decision", kind="float", min=0, max=10, step=0.0001, label="PID積分ゲイン (K_I)",
+         help="定常的なズレを補正する積分項。"),
+    dict(key="K_D", category="decision", kind="float", min=0, max=10, step=0.0001, label="PID微分ゲイン (K_D)",
+         help="急な変化を抑える微分項。振動を抑えたい時に上げる。"),
+    dict(key="FTG_SAFETY_DISTANCE", category="decision", kind="int", min=0, max=3000,
+         label="Follow the Gap 安全距離 (FTG_SAFETY_DISTANCE, mm)",
+         help="follow_the_gap/mppi_localモードで障害物とみなす安全マージン。"),
+    dict(key="EPOCHS", category="decision", kind="int", min=1, max=500, label="学習回数 (EPOCHS)",
+         help="train_pytorch.py実行時、集めたデータを何周学習させるか。まずは30前後が目安。"),
+    dict(key="BATCH_SIZE", category="decision", kind="int", min=1, max=512, label="バッチサイズ (BATCH_SIZE)",
+         help="1回の学習ステップで同時に見せるデータ数。"),
+    dict(key="HIDDEN_DIM", category="decision", kind="int", min=1, max=1024, label="隠れ層の大きさ (HIDDEN_DIM)",
+         help="ニューラルネットの1層あたりのノード数。"),
+    dict(key="NUM_HIDDEN_LAYERS", category="decision", kind="int", min=1, max=20, label="隠れ層の数 (NUM_HIDDEN_LAYERS)",
+         help="ニューラルネットの層の深さ。基本は2〜3層で十分。"),
+    dict(key="MODEL_DIR", category="decision", kind="str", label="モデル保存フォルダ (MODEL_DIR)",
+         help="学習済みモデルを保存・読み込みするフォルダ名。通常は変更不要。"),
+    dict(key="MODEL_NAME", category="decision", kind="str", label="使用するモデルファイル名 (MODEL_NAME)",
+         help="自動走行時に読み込む学習済みモデルのファイル名。"),
+
+    # ============================== 操作 ==============================
+    dict(key="FORWARD_STRAIGHT", category="control", kind="float", min=-1, max=1, step=0.05,
+         label="直線速度 (FORWARD_STRAIGHT)", help="まっすぐ進む速さ。0〜1の範囲が目安。"),
+    dict(key="FORWARD_CORNER", category="control", kind="float", min=-1, max=1, step=0.05,
+         label="カーブ速度 (FORWARD_CORNER)", help="カーブでの速さ。直線速度より少し小さめが目安。"),
+    dict(key="STEERING_CENTER_PWM", category="control", kind="int", min=100, max=600,
+         label="ステアリング中央PWM (STEERING_CENTER_PWM)", help="ステアリングがまっすぐになるPWM値。motor.pyで調整した値を入れる。"),
+    dict(key="STEERING_WIDTH_PWM", category="control", kind="int", min=0, max=300,
+         label="ステアリング振れ幅PWM (STEERING_WIDTH_PWM)", help="中央から左右にどれだけ振れるか。"),
+    dict(key="THROTTLE_STOPPED_PWM", category="control", kind="int", min=100, max=600,
+         label="スロットル停止PWM (THROTTLE_STOPPED_PWM)", help="モーターが止まるPWM値(ニュートラル)。"),
+    dict(key="THROTTLE_FORWARD_PWM", category="control", kind="int", min=100, max=600,
+         label="スロットル前進最大PWM (THROTTLE_FORWARD_PWM)", help="前進最大速度のPWM値。"),
+    dict(key="THROTTLE_REVERSE_PWM", category="control", kind="int", min=100, max=600,
+         label="スロットル後退最大PWM (THROTTLE_REVERSE_PWM)", help="後退最大速度のPWM値。"),
+    dict(key="CONTROLLER_TYPE", category="control", kind="choice", options=["joystick", "pwm", "keyboard"],
+         label="コントローラー種類 (CONTROLLER_TYPE)", help="手動操作に使う入力装置。"),
+    dict(key="JOYSTICK_STEERING_SCALE", category="control", kind="float", min=-1, max=1, step=0.1,
+         label="ジョイスティック ステアリング感度 (JOYSTICK_STEERING_SCALE)", help="左右が逆に動く場合は符号を反転する。"),
+    dict(key="JOYSTICK_THROTTLE_SCALE", category="control", kind="float", min=-1, max=1, step=0.1,
+         label="ジョイスティック スロットル感度 (JOYSTICK_THROTTLE_SCALE)", help="前後が逆に動く場合は符号を反転する。"),
+
+    # ============================== 演出 ==============================
+    dict(key="USE_ENGINE_SOUND", category="fx", kind="bool", label="エンジン音を再生 (USE_ENGINE_SOUND)",
+         help="throttle値に応じてスピーカーからエンジン音を再生する(走行には影響しない演出機能)。"),
+    dict(key="ENGINE_SOUND_VOLUME", category="fx", kind="float", min=0, max=1, step=0.05,
+         label="エンジン音量 (ENGINE_SOUND_VOLUME)", help="マスター音量。0.0〜1.0。"),
+]
+CURATED_KEYS = {f["key"] for f in CURATED_FIELDS if not f["key"].startswith("_")}
+
+# ---------------------------------------------------------------------------
+# config.py の33セクション見出し → 6処理カテゴリ への対応づけ
+# (実ファイルをgrepして集計したセクション一覧に基づく。config.py側の見出しが
+#  変わらない限り有効。見つからない見出しは "basic" にフォールバックする)
+# ---------------------------------------------------------------------------
+SECTION_CATEGORY = {
+    "デバイス設定": "basic",
+    "出力・モニタリング設定": "basic",
+    "VSLAM (Visual SLAM via Isaac ROS Visual SLAM + RealSense D435i)": "localization",
+    "ナビゲーション（自己位置ベース）共通設定": "localization",
+    "調停層（Arbiter）: 主制御(PLAN)に副制御を組み合わせる": "decision",
+    "ArUco Localization (外部PCの俯瞰カメラ + 各車ルーフマーカーによる絶対自己位置)": "localization",
+    "モーター制御基本設定": "control",
+    "測距センサー検知範囲設定（超音波/LiDAR共通、単位: mm）": "perception",
+    "走行プラン（判断モード）選択": "decision",
+    "各種走行モード固有のパラメータ": "decision",
+    "復帰モード設定": "control",
+    "車両調整用パラメータ（ハードウェア設定）": "control",
+    "機械学習モデル設定（NN/CNN）": "decision",
+    "マルチカメラ・仮想ソース推論設定": "decision",
+    "超音波センサ設定": "perception",
+    "カメラ設定": "perception",
+    "LiDAR設定": "perception",
+    "ROS2 slam_toolbox 統合（lidar_slam の代替・configで選択）": "localization",
+    "LiDAR機種別設定": "perception",
+    "YDLidar GS2（近距離専用ライン測距センサー, 〜30cm / 160点）": "perception",
+    "Follow the Gap 設定": "decision",
+    "LiDAR自動スロットル調整機能": "decision",
+    "コントローラー設定": "control",
+    "IMU/ジャイロ設定": "perception",
+    "RPMセンサー設定": "perception",
+    "オプティカルフローセンサー設定": "perception",
+    "Speed PID制御設定（速度フィードバック制御）": "decision",
+    "走行記録設定": "basic",
+    "シミュレーションモード": "basic",
+    "位置推論とモデル切り替え設定": "decision",
+    "YOLO物体検知設定": "decision",
+    "エンジン音設定（engine_sound.py）": "fx",
+    "強化学習（RL）プラン設定": "decision",
+}
+
+# config.py 側で PLAN_LIST など「別枠で特別扱いする」トップレベル変数名(詳細設定には出さない)
+_EXCLUDE_FROM_ADVANCED = {"PLAN_LIST"}
 
 # ---------------------------------------------------------------------------
 # 走行モード(PLAN)の解説データ
@@ -150,8 +276,20 @@ def build_plan_info() -> dict:
 PLAN_INFO = build_plan_info()
 _PLAN_INFO_FALLBACK = dict(category="詳細未整理", input="-", summary="このモードの解説はまだ用意されていません。planner.py の該当メソッドを確認してください。", files=[])
 
+SENSOR_OPTIONS = [
+    ("ultrasonic", "超音波センサー"),
+    ("lidar", "LiDAR"),
+    ("gs2", "GS2（近距離ラインセンサー）"),
+    ("camera_0", "カメラ 0"),
+    ("camera_1", "カメラ 1"),
+    ("imu", "IMU（加速度・ジャイロ）"),
+    ("optical_flow", "オプティカルフロー"),
+    ("rpm", "RPMセンサー"),
+]
+
+
 # ---------------------------------------------------------------------------
-# config.py の読み書き
+# config.py の読み書き(キー単位で汎用に扱う)
 # ---------------------------------------------------------------------------
 def _line_pattern(key: str) -> re.Pattern:
     # group1: "KEY = "  group2: 値の式  group3: 行末コメント(あれば)
@@ -184,68 +322,125 @@ def read_plan_list(text: str) -> list[dict]:
     return [g for g in groups if g["options"]]
 
 
-def read_values(text: str) -> dict:
+def parse_config_sections(text: str) -> list[tuple[int, str]]:
+    """config.py 自身の "# ====...====" 見出しブロックから (行番号, 見出し文) の一覧を抽出する。
+    見出しは bar / title / bar の3行1組が基本だが、bar / title のみ(閉じbarなし)の
+    崩れたパターンも許容する。"""
+    lines = text.split("\n")
+    n = len(lines)
+    sections: list[tuple[int, str]] = []
+    i = 0
+    while i < n:
+        if lines[i].startswith("# ====="):
+            if i + 1 < n and lines[i + 1].startswith("#") and not lines[i + 1].startswith("# ====="):
+                title = lines[i + 1].strip().lstrip("#").strip()
+                sections.append((i + 1, title))
+                j = i + 2
+                if j < n and lines[j].startswith("# ====="):
+                    j += 1
+                i = j
+                continue
+        i += 1
+    return sections
+
+
+def read_key_values(keys: list[str], text: str) -> dict:
     values = {}
-    for f in FIELDS:
-        pat = _line_pattern(f["key"])
-        m = pat.search(text)
+    for key in keys:
+        m = _line_pattern(key).search(text)
         if not m:
-            values[f["key"]] = None
+            values[key] = None
             continue
         raw = m.group(2).strip()
         try:
-            values[f["key"]] = ast.literal_eval(raw)
+            values[key] = ast.literal_eval(raw)
         except Exception:
-            values[f["key"]] = raw.strip("\"'")
+            values[key] = raw.strip("\"'")
     return values
 
 
-def read_line_meta(text: str) -> dict:
-    """各フィールドが config.py の何行目の、どの行にあるかを読み取る(コード表示用)。"""
+def read_line_meta(keys: list[str], text: str) -> dict:
+    """指定キー群が config.py の何行目の、どの行にあるかを読み取る(コード表示用)。
+    値が単純なPythonリテラルとして解釈できない場合(他の変数を参照する式・複数行の
+    リスト/辞書など)は editable=False とし、表示専用にする。"""
     meta = {}
-    for f in FIELDS:
-        key = f["key"]
-        pat = _line_pattern(key)
-        m = pat.search(text)
+    for key in keys:
+        m = _line_pattern(key).search(text)
         if not m:
             meta[key] = None
             continue
         line_no = text.count("\n", 0, m.start()) + 1
+        raw = m.group(2)  # 触っていない項目を保存時に再現できるよう、空白を落とさずそのまま保持する
+        try:
+            ast.literal_eval(raw.strip())
+            editable = True
+        except Exception:
+            editable = False
         meta[key] = dict(
             line=line_no,
             prefix=m.group(1),
             comment=(m.group(3) or "").strip(),
             full=m.group(0),
+            raw=raw,
+            editable=editable,
         )
     return meta
 
 
-def literal_for(kind: str, value) -> str:
-    if kind == "str":
+def build_advanced_sections(text: str) -> dict:
+    """カテゴリID -> [ {title, fields:[{key, meta}]} ] を、config.py自身のセクション
+    構造から動的に組み立てる(キュレーション済みキーとPLAN_LISTは除外)。"""
+    key_pat = re.compile(r"^([A-Z][A-Z0-9_]*)\s*=")
+    lines = text.split("\n")
+    sections = parse_config_sections(text)
+    starts = [s for s, _ in sections] + [len(lines)]
+
+    result = {c["id"]: [] for c in CATEGORIES}
+    for idx, (start, title) in enumerate(sections):
+        end = starts[idx + 1]
+        keys = []
+        for ln in lines[start:end]:
+            m = key_pat.match(ln)
+            if m:
+                keys.append(m.group(1))
+        keys = [k for k in keys if k not in CURATED_KEYS and k not in _EXCLUDE_FROM_ADVANCED]
+        if not keys:
+            continue
+        cat_id = SECTION_CATEGORY.get(title, "basic")
+        meta = read_line_meta(keys, text)
+        fields = [dict(key=k, meta=meta[k]) for k in keys if meta.get(k)]
+        if fields:
+            result[cat_id].append(dict(title=title, fields=fields))
+    return result
+
+
+def literal_for(kind: str, value, field: dict | None = None) -> str:
+    if kind in ("str", "select", "choice"):
         return json.dumps(str(value))
     if kind == "int":
         return str(int(value))
     if kind == "float":
         return str(float(value))
+    if kind == "bool":
+        return "True" if value else "False"
     if kind == "sensors":
         items = [str(v) for v in value if str(v).strip()]
         return "[" + ", ".join(json.dumps(v) for v in items) + "]"
-    if kind == "select":
-        return json.dumps(str(value))
+    if kind == "raw":
+        # value は既にconfig.py上のPythonリテラル文字列そのもの(検証済み)
+        return str(value)
     raise ValueError(f"unknown kind: {kind}")
 
 
-def validate(field: dict, value):
-    kind = field["kind"]
-    key = field["key"]
+def validate(kind: str, key: str, value, field: dict | None = None):
     if kind == "int":
         try:
             v = int(value)
         except (TypeError, ValueError):
             raise ValueError(f"{key} は整数で入力してください")
-        if "min" in field and v < field["min"]:
+        if field and "min" in field and v < field["min"]:
             raise ValueError(f"{key} は {field['min']} 以上にしてください")
-        if "max" in field and v > field["max"]:
+        if field and "max" in field and v > field["max"]:
             raise ValueError(f"{key} は {field['max']} 以下にしてください")
         return v
     if kind == "float":
@@ -253,24 +448,51 @@ def validate(field: dict, value):
             v = float(value)
         except (TypeError, ValueError):
             raise ValueError(f"{key} は数値で入力してください")
-        if "min" in field and v < field["min"]:
+        if field and "min" in field and v < field["min"]:
             raise ValueError(f"{key} は {field['min']} 以上にしてください")
-        if "max" in field and v > field["max"]:
+        if field and "max" in field and v > field["max"]:
             raise ValueError(f"{key} は {field['max']} 以下にしてください")
         return v
+    if kind == "bool":
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in ("true", "1", "yes", "on")
     if kind in ("str", "select"):
         v = str(value).strip()
         if not v:
             raise ValueError(f"{key} を入力してください")
         return v
+    if kind == "choice":
+        v = str(value).strip()
+        if not v:
+            raise ValueError(f"{key} を入力してください")
+        if field and field.get("options") and v not in field["options"]:
+            raise ValueError(f"{key} は {field['options']} のいずれかにしてください")
+        return v
     if kind == "sensors":
         if not isinstance(value, list) or not value:
             raise ValueError("センサーを最低1つ選んでください")
         return [str(v) for v in value]
+    if kind == "raw":
+        # 触っていない項目をそのまま送り返してきた場合に元の空白をstripで潰さないよう、
+        # 検証のためのstripは別変数で行い、返す値は受け取ったままにする
+        text = str(value)
+        if text.strip() == "":
+            raise ValueError(f"{key} を入力してください")
+        try:
+            ast.literal_eval(text.strip())
+        except Exception as e:
+            raise ValueError(f"{key} の書き方が正しくありません(Pythonの値として解釈できません): {e}")
+        return text
     raise ValueError(f"unknown kind: {kind}")
 
 
-def write_values(new_values: dict) -> Path:
+def write_values(new_values: dict, kinds: dict, fields_by_key: dict) -> Path:
+    """new_values: {key: 検証済みの値}, kinds: {key: kind}, fields_by_key: {key: fieldディクショナリ(min/max/options等)}
+
+    保存フォームは(触っていない項目も含め)全項目を毎回送ってくるため、実際に内容が
+    変わった行だけを書き換える(触っていない行はバイト単位で元のまま残す)。
+    """
     text = CONFIG_PATH.read_text(encoding="utf-8")
 
     backup_path = CONFIG_PATH.with_name(
@@ -278,16 +500,15 @@ def write_values(new_values: dict) -> Path:
     )
     shutil.copy2(CONFIG_PATH, backup_path)
 
-    for f in FIELDS:
-        key = f["key"]
-        if key not in new_values:
-            continue
-        literal = literal_for(f["kind"], new_values[key])
+    for key, value in new_values.items():
+        kind = kinds[key]
+        literal = literal_for(kind, value, fields_by_key.get(key))
         pat = _line_pattern(key)
 
         def repl(m, literal=literal):
             comment = m.group(3) or ""
-            return f"{m.group(1)}{literal}{comment}"
+            new_line = f"{m.group(1)}{literal}{comment}"
+            return new_line if new_line != m.group(0) else m.group(0)
 
         text, n = pat.subn(repl, text, count=1)
         if n == 0:
@@ -308,17 +529,6 @@ PALETTE = dict(
 
 ACCENT_COLOR = {"cyan": PALETTE["cyan"], "orange": PALETTE["orange"], "steel": PALETTE["steel"]}
 ACCENT_TINT = {"cyan": PALETTE["cyan_tint"], "orange": PALETTE["orange_tint"], "steel": PALETTE["steel_tint"]}
-
-SENSOR_OPTIONS = [
-    ("ultrasonic", "超音波センサー"),
-    ("lidar", "LiDAR"),
-    ("gs2", "GS2（近距離ラインセンサー）"),
-    ("camera_0", "カメラ 0"),
-    ("camera_1", "カメラ 1"),
-    ("imu", "IMU（加速度・ジャイロ）"),
-    ("optical_flow", "オプティカルフロー"),
-    ("rpm", "RPMセンサー"),
-]
 
 
 def _html_escape(text: str) -> str:
@@ -351,6 +561,16 @@ def render_field(field: dict, value, plan_groups, meta: dict) -> str:
             options_html += f'<optgroup label="{group["group"]}">{opts}</optgroup>'
         control = (f'<select name="{key}" data-kind="select" onchange="onPlanChange(this.value)">{options_html}</select>'
                    f'<div id="plan-info" class="plan-info"></div>')
+    elif kind == "choice":
+        opts = "".join(
+            f'<option value="{o}" {"selected" if o == value else ""}>{o}</option>'
+            for o in field.get("options", [])
+        )
+        control = f'<select name="{key}" data-kind="choice" onchange="refreshCodePreview(\'{key}\')">{opts}</select>'
+    elif kind == "bool":
+        checked = "checked" if value else ""
+        control = (f'<label class="chk single"><input type="checkbox" name="{key}" data-kind="bool" {checked} '
+                   f'onchange="refreshCodePreview(\'{key}\')"><span>有効にする</span></label>')
     elif kind == "sensors":
         current = set(value or [])
         boxes = "".join(
@@ -390,42 +610,107 @@ def render_field(field: dict, value, plan_groups, meta: dict) -> str:
     </div>'''
 
 
+def render_advanced_sections(sections: list[dict]) -> str:
+    if not sections:
+        return ""
+    total = sum(len(s["fields"]) for s in sections)
+    body = ""
+    for sec in sections:
+        rows = ""
+        for f in sec["fields"]:
+            key = f["key"]
+            m = f["meta"]
+            if m["editable"]:
+                rows += f'''
+              <tr>
+                <td><code>{_html_escape(key)}</code></td>
+                <td class="adv-value-cell">
+                  <input type="text" class="adv-input" name="{key}" data-kind="raw"
+                         value="{_html_escape(m['raw'])}" oninput="refreshCodePreview('{key}')">
+                  <div class="field-code" id="code-{key}" data-line="{m['line']}"
+                       data-prefix="{_html_escape(m['prefix'])}" data-comment="{_html_escape(m['comment'])}">
+                    <span class="code-loc">config.py {m['line']}行目</span>
+                    <code class="code-cur">{_html_escape(m['full'])}</code>
+                  </div>
+                  <p class="field-error" data-error-for="{key}"></p>
+                </td>
+              </tr>'''
+            else:
+                rows += f'''
+              <tr class="readonly">
+                <td><code>{_html_escape(key)}</code></td>
+                <td class="adv-value-cell">
+                  <code class="code-readonly">{_html_escape(m['full'])}</code>
+                  <p class="field-help">他の設定を参照する計算式のため、この画面では編集できません(config.py {m['line']}行目を直接編集してください)。</p>
+                </td>
+              </tr>'''
+        body += f'''
+        <div class="adv-subsection">
+          <h4>{_html_escape(sec["title"])}</h4>
+          <table class="adv-table"><tbody>{rows}</tbody></table>
+        </div>'''
+    return f'''
+    <details class="advanced">
+      <summary>詳細設定を表示（{total}項目）</summary>
+      {body}
+    </details>'''
+
+
 def render_page() -> str:
     text = CONFIG_PATH.read_text(encoding="utf-8")
-    values = read_values(text)
+    curated_keys = [f["key"] for f in CURATED_FIELDS if not f["key"].startswith("_")]
+    values = read_key_values(curated_keys, text)
     plan_groups = read_plan_list(text)
-    line_meta = read_line_meta(text)
+    curated_meta = read_line_meta(curated_keys, text)
+    advanced = build_advanced_sections(text)
 
-    cards = ""
-    for cat in CATEGORIES:
+    tabs_nav = ""
+    panels = ""
+    for i, cat in enumerate(CATEGORIES):
         accent = ACCENT_COLOR[cat["accent"]]
         tint = ACCENT_TINT[cat["accent"]]
+        active = "active" if i == 0 else ""
+        tabs_nav += (f'<button class="tab-btn {active}" data-tab="{cat["id"]}" '
+                     f'onclick="switchTab(\'{cat["id"]}\')">{cat["icon"]} {cat["title"]}</button>')
+
         fields_html = "".join(
-            render_field(f, values.get(f["key"]), plan_groups, line_meta)
-            for f in FIELDS if f["category"] == cat["id"]
+            render_field(f, values.get(f["key"]), plan_groups, curated_meta)
+            for f in CURATED_FIELDS if f["category"] == cat["id"]
         )
-        cards += f'''
-        <section class="card">
-          <div class="card-head">
-            <div class="icon-circle" style="background:{tint}">{cat["icon"]}</div>
-            <div>
-              <h2>{cat["title"]}</h2>
-              <p class="card-subtitle">{cat["subtitle"]}</p>
-            </div>
+        advanced_html = render_advanced_sections(advanced.get(cat["id"], []))
+
+        panels += f'''
+        <section class="tab-panel {active}" id="panel-{cat["id"]}">
+          <div class="panel-head" style="background:{tint}">
+            <h2>{cat["icon"]} {cat["title"]}</h2>
+            <p>{cat["subtitle"]}</p>
           </div>
-          <div class="card-body" style="border-color:{accent}22">{fields_html}</div>
+          <div class="card">
+            <div class="card-body" style="border-color:{accent}22">{fields_html}</div>
+          </div>
+          {advanced_html}
         </section>'''
 
-    field_meta_js = {
-        f["key"]: dict(kind=f["kind"], **line_meta[f["key"]])
-        for f in FIELDS if f["kind"] != "diagram" and line_meta.get(f["key"])
-    }
+    # FIELD_META: キュレーション項目 + 詳細設定の編集可能項目をまとめてJSに渡す
+    field_meta_js = {}
+    for f in CURATED_FIELDS:
+        if f["kind"] == "diagram":
+            continue
+        m = curated_meta.get(f["key"])
+        if m:
+            field_meta_js[f["key"]] = dict(kind=f["kind"], **m)
+    for sections in advanced.values():
+        for sec in sections:
+            for fmeta in sec["fields"]:
+                if fmeta["meta"]["editable"]:
+                    field_meta_js[fmeta["key"]] = dict(kind="raw", **fmeta["meta"])
 
     plan_info_json = json.dumps(PLAN_INFO, ensure_ascii=False)
     plan_fallback_json = json.dumps(_PLAN_INFO_FALLBACK, ensure_ascii=False)
     return (
         HTML_SHELL
-        .replace("__CARDS__", cards)
+        .replace("__TABS_NAV__", tabs_nav)
+        .replace("__PANELS__", panels)
         .replace("__CONFIG_PATH__", str(CONFIG_PATH))
         .replace("__PLAN_INFO__", plan_info_json)
         .replace("__PLAN_FALLBACK__", plan_fallback_json)
@@ -453,23 +738,33 @@ HTML_SHELL = f'''<!doctype html>
     padding-bottom: 6rem;
   }}
   header {{
-    background: var(--navy); color: #fff; padding: 2rem 1.5rem 2.4rem;
+    background: var(--navy); color: #fff; padding: 1.6rem 1.5rem 1.6rem;
   }}
   header .eyebrow {{ color: var(--cyan); font-size: 0.75rem; font-weight: 700; letter-spacing: 0.12em; }}
-  header h1 {{ margin: 0.3rem 0 0.4rem; font-size: 1.6rem; }}
-  header p {{ margin: 0; color: #B9C0D4; font-size: 0.9rem; }}
-  main {{ max-width: 760px; margin: -1.4rem auto 0; padding: 0 1.2rem; display: flex; flex-direction: column; gap: 1.1rem; }}
+  header h1 {{ margin: 0.3rem 0 0.4rem; font-size: 1.5rem; }}
+  header p {{ margin: 0; color: #B9C0D4; font-size: 0.85rem; }}
+
+  .tabs-nav {{
+    position: sticky; top: 0; z-index: 5; background: #fff; border-bottom: 1px solid #E4E7F0;
+    display: flex; overflow-x: auto; padding: 0 0.6rem;
+  }}
+  .tab-btn {{
+    border: none; background: none; padding: 0.85rem 0.9rem; font-size: 0.85rem; font-weight: 700;
+    color: var(--muted); cursor: pointer; white-space: nowrap; border-bottom: 3px solid transparent;
+  }}
+  .tab-btn.active {{ color: var(--text-dark); border-bottom-color: var(--orange); }}
+
+  main {{ max-width: 820px; margin: 1.2rem auto 0; padding: 0 1.2rem; }}
+  .tab-panel {{ display: none; flex-direction: column; gap: 1.1rem; }}
+  .tab-panel.active {{ display: flex; }}
+  .panel-head {{ border-radius: 14px; padding: 1rem 1.3rem; }}
+  .panel-head h2 {{ margin: 0 0 0.2rem; font-size: 1.15rem; }}
+  .panel-head p {{ margin: 0; font-size: 0.82rem; color: var(--text-dark); opacity: 0.75; }}
+
   .card {{
     background: #fff; border-radius: 16px; box-shadow: 0 8px 24px rgba(16,19,26,0.08);
     overflow: hidden;
   }}
-  .card-head {{ display: flex; align-items: center; gap: 0.9rem; padding: 1.3rem 1.4rem 1rem; }}
-  .icon-circle {{
-    width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center;
-    justify-content: center; font-size: 1.3rem; flex-shrink: 0;
-  }}
-  .card-head h2 {{ margin: 0; font-size: 1.05rem; }}
-  .card-subtitle {{ margin: 0.15rem 0 0; color: var(--muted); font-size: 0.82rem; }}
   .card-body {{ padding: 0.2rem 1.4rem 1.3rem; border-top: 1px solid; }}
   .field {{ padding: 0.9rem 0; border-bottom: 1px solid #EEF0F5; }}
   .field:last-child {{ border-bottom: none; }}
@@ -484,6 +779,7 @@ HTML_SHELL = f'''<!doctype html>
   .chk-group {{ display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; }}
   .chk {{ display: flex; align-items: center; gap: 0.4rem; font-size: 0.88rem; background: #FBFBFD;
     border: 1px solid #D8DCE6; padding: 0.4rem 0.65rem; border-radius: 8px; cursor: pointer; }}
+  .chk.single {{ display: inline-flex; }}
   .chk input {{ accent-color: var(--cyan); }}
   .plan-info {{
     margin-top: 0.7rem; background: var(--card-bg); border-radius: 10px; padding: 0.8rem 0.9rem;
@@ -534,6 +830,34 @@ HTML_SHELL = f'''<!doctype html>
   .lidar-sweep {{ fill: none; stroke: #D8DCE6; stroke-width: 1; stroke-dasharray: 2 3; }}
   .lidar-sweep.active {{ stroke: var(--cyan); }}
 
+  /* 詳細設定 */
+  details.advanced {{
+    background: #fff; border-radius: 16px; box-shadow: 0 8px 24px rgba(16,19,26,0.06); padding: 0.2rem 1.2rem;
+  }}
+  details.advanced summary {{
+    cursor: pointer; padding: 1rem 0; font-weight: 700; font-size: 0.9rem; color: var(--muted);
+    list-style: none;
+  }}
+  details.advanced summary::-webkit-details-marker {{ display: none; }}
+  details.advanced summary::before {{ content: "▸ "; color: var(--orange); }}
+  details.advanced[open] summary::before {{ content: "▾ "; }}
+  .adv-subsection {{ padding: 0 0 1.2rem; }}
+  .adv-subsection h4 {{ margin: 0 0 0.5rem; font-size: 0.85rem; color: var(--text-dark); }}
+  .adv-table {{ width: 100%; border-collapse: collapse; }}
+  .adv-table td {{ padding: 0.5rem 0.4rem; border-bottom: 1px solid #F0F1F5; vertical-align: top; font-size: 0.85rem; }}
+  .adv-table td:first-child {{ width: 34%; padding-top: 0.75rem; }}
+  .adv-table code {{ font-size: 0.78rem; }}
+  .adv-input {{
+    width: 100%; padding: 0.4rem 0.6rem; border: 1px solid #D8DCE6; border-radius: 6px;
+    font-family: "SF Mono", "Menlo", "Consolas", monospace; font-size: 0.8rem; background: #FBFBFD;
+  }}
+  .adv-input:focus {{ outline: 2px solid var(--cyan); outline-offset: 1px; border-color: var(--cyan); }}
+  tr.readonly {{ opacity: 0.75; }}
+  .code-readonly {{
+    display: block; background: var(--card-bg); border-radius: 6px; padding: 0.4rem 0.6rem;
+    font-family: "SF Mono", "Menlo", "Consolas", monospace; font-size: 0.78rem; color: var(--text-dark);
+  }}
+
   .savebar {{
     position: fixed; left: 0; right: 0; bottom: 0; background: #fff;
     border-top: 1px solid #E4E7F0; padding: 0.9rem 1.2rem; display: flex; align-items: center;
@@ -560,17 +884,23 @@ HTML_SHELL = f'''<!doctype html>
 <header>
   <div class="eyebrow">TOGIKAIDRIVE · CONFIG EDITOR</div>
   <h1>設定エディタ</h1>
-  <p>config.py の機械学習チュートリアル関連項目を、フォームから安全に編集します。</p>
+  <p>config.py 全480項目を、ミニカーの処理カテゴリ別にまとめて安全に編集します。</p>
 </header>
+<nav class="tabs-nav">__TABS_NAV__</nav>
 <div id="toast"></div>
-<main id="cards">
-__CARDS__
+<main>
+__PANELS__
 </main>
 <div class="savebar">
   <span class="path">対象: __CONFIG_PATH__</span>
   <button id="save">変更を保存</button>
 </div>
 <script>
+function switchTab(id) {{
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === id));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + id));
+}}
+
 const PLAN_INFO = __PLAN_INFO__;
 const PLAN_FALLBACK = __PLAN_FALLBACK__;
 
@@ -609,9 +939,10 @@ document.addEventListener('DOMContentLoaded', () => {{
 
 // ---------------------------------------------------------------------
 // コードプレビュー: フォームの値が config.py の実際の行にどう反映されるか
+// (「よく使う設定」「詳細設定」どちらの項目にも同じ仕組みを使う)
 // ---------------------------------------------------------------------
 function formatLiteral(kind, value) {{
-  if (kind === 'str' || kind === 'select') return JSON.stringify(String(value));
+  if (kind === 'str' || kind === 'select' || kind === 'choice') return JSON.stringify(String(value));
   if (kind === 'int') {{
     const n = parseInt(value, 10);
     return String(Number.isFinite(n) ? n : value);
@@ -620,20 +951,25 @@ function formatLiteral(kind, value) {{
     const n = parseFloat(value);
     return String(Number.isFinite(n) ? n : value);
   }}
+  if (kind === 'bool') return value ? 'True' : 'False';
   if (kind === 'sensors') {{
     return '[' + value.map(v => JSON.stringify(v)).join(', ') + ']';
   }}
+  if (kind === 'raw') return String(value);
   return JSON.stringify(String(value));
 }}
 
 function getCurrentValue(key) {{
-  const kind = FIELD_META[key] ? FIELD_META[key].kind : null;
+  const meta = FIELD_META[key];
+  const kind = meta ? meta.kind : null;
   if (kind === 'sensors') {{
     const group = document.querySelector(`.chk-group[data-key="${{key}}"]`);
     return Array.from(group.querySelectorAll('input[type=checkbox]:checked')).map(c => c.value);
   }}
   const el = document.querySelector(`[name="${{key}}"]`);
-  return el ? el.value : null;
+  if (!el) return null;
+  if (kind === 'bool') return el.checked;
+  return el.value;
 }}
 
 function refreshCodePreview(key) {{
@@ -697,11 +1033,9 @@ function renderCarDiagram() {{
   }};
 
   svg.appendChild(el('rect', {{x: 50, y: 20, width: 120, height: 320, rx: 28, class: 'car-body'}}));
-  // ホイール
   [[42, 62], [164, 62], [42, 282], [164, 282]].forEach(([x, y]) => {{
     svg.appendChild(el('rect', {{x, y, width: 14, height: 34, rx: 4, class: 'car-wheel'}}));
   }});
-  // 進行方向の矢印(前方)
   svg.appendChild(el('polygon', {{points: '110,26 100,40 120,40', fill: '#B9C0D4'}}));
 
   SENSOR_POINTS.forEach(p => {{
@@ -746,6 +1080,9 @@ function updateCarDiagram() {{
   }});
 }}
 
+// ---------------------------------------------------------------------
+// 保存
+// ---------------------------------------------------------------------
 function collectValues() {{
   const values = {{}};
   document.querySelectorAll('[data-kind]').forEach(el => {{
@@ -753,9 +1090,10 @@ function collectValues() {{
     if (kind === 'sensors') {{
       const key = el.dataset.key;
       values[key] = Array.from(el.querySelectorAll('input[type=checkbox]:checked')).map(c => c.value);
+    }} else if (kind === 'bool') {{
+      values[el.name] = el.checked;
     }} else {{
-      const key = el.name;
-      values[key] = el.value;
+      values[el.name] = el.value;
     }}
   }});
   return values;
@@ -804,6 +1142,23 @@ document.getElementById('save').addEventListener('click', async () => {{
 # ---------------------------------------------------------------------------
 # サーバー
 # ---------------------------------------------------------------------------
+def _all_field_defs() -> dict:
+    """key -> {kind, ...(min/max/optionsなど)} を、キュレーション+詳細設定の両方から作る(POST検証用)。"""
+    text = CONFIG_PATH.read_text(encoding="utf-8")
+    defs = {}
+    for f in CURATED_FIELDS:
+        if f["kind"] == "diagram":
+            continue
+        defs[f["key"]] = f
+    advanced = build_advanced_sections(text)
+    for sections in advanced.values():
+        for sec in sections:
+            for fmeta in sec["fields"]:
+                if fmeta["meta"]["editable"]:
+                    defs[fmeta["key"]] = dict(key=fmeta["key"], kind="raw")
+    return defs
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # 標準出力を静かに保つ
@@ -832,13 +1187,17 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         try:
             posted = json.loads(raw.decode("utf-8"))
+            field_defs = _all_field_defs()
             new_values = {}
-            for f in FIELDS:
-                key = f["key"]
-                if key not in posted:
-                    continue
-                new_values[key] = validate(f, posted[key])
-            backup = write_values(new_values)
+            kinds = {}
+            for key, value in posted.items():
+                field = field_defs.get(key)
+                if not field:
+                    continue  # 未知のキーは無視(古いページ/改ざん対策)
+                kind = field["kind"]
+                new_values[key] = validate(kind, key, value, field)
+                kinds[key] = kind
+            backup = write_values(new_values, kinds, field_defs)
             response = dict(ok=True, backup=backup.name)
             status = 200
         except ValueError as e:
