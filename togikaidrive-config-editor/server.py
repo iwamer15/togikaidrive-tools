@@ -21,6 +21,7 @@ config.py(480項目・1281行の生Pythonファイル)を、ミニカーの処�
 from __future__ import annotations
 
 import ast
+import hashlib
 import html
 import json
 import re
@@ -33,6 +34,7 @@ from pathlib import Path
 PORT = 8899
 # togikaidrive-config-editor/ と togikaidrive-dev/ は ト技会-minicar/ 直下の兄弟フォルダ
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "togikaidrive-dev" / "config.py"
+TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
 # ---------------------------------------------------------------------------
 # ミニカー処理カテゴリ(6分類)
@@ -414,6 +416,25 @@ def build_advanced_sections(text: str) -> dict:
     return result
 
 
+def build_code_log(text: str) -> dict:
+    """カテゴリID -> [ {title, start_line, code} ] を、config.py自身のセクション区切りから
+    そのまま切り出す(詳細設定のようなkey=value抽出ではなく、生コードそのもの)。"""
+    lines = text.split("\n")
+    sections = parse_config_sections(text)
+    starts = [s for s, _ in sections]
+
+    result = {c["id"]: [] for c in CATEGORIES}
+    for idx, (title_idx, title) in enumerate(sections):
+        bar_idx = title_idx - 1  # 見出しの開始bar行(0-indexed)
+        next_bar_idx = (starts[idx + 1] - 1) if idx + 1 < len(sections) else len(lines)
+        block = lines[bar_idx:next_bar_idx]
+        while block and block[-1].strip() == "":
+            block.pop()
+        cat_id = SECTION_CATEGORY.get(title, "basic")
+        result[cat_id].append(dict(title=title, start_line=bar_idx + 1, code="\n".join(block)))
+    return result
+
+
 def literal_for(kind: str, value, field: dict | None = None) -> str:
     if kind in ("str", "select", "choice"):
         return json.dumps(str(value))
@@ -494,11 +515,7 @@ def write_values(new_values: dict, kinds: dict, fields_by_key: dict) -> Path:
     変わった行だけを書き換える(触っていない行はバイト単位で元のまま残す)。
     """
     text = CONFIG_PATH.read_text(encoding="utf-8")
-
-    backup_path = CONFIG_PATH.with_name(
-        f"config.py.bak.{datetime.datetime.now():%Y%m%d_%H%M%S}"
-    )
-    shutil.copy2(CONFIG_PATH, backup_path)
+    backup_path = _make_backup()
 
     for key, value in new_values.items():
         kind = kinds[key]
@@ -516,6 +533,115 @@ def write_values(new_values: dict, kinds: dict, fields_by_key: dict) -> Path:
 
     CONFIG_PATH.write_text(text, encoding="utf-8")
     return backup_path
+
+
+def _make_backup() -> Path:
+    backup_path = CONFIG_PATH.with_name(
+        f"config.py.bak.{datetime.datetime.now():%Y%m%d_%H%M%S}"
+    )
+    shutil.copy2(CONFIG_PATH, backup_path)
+    return backup_path
+
+
+# ---------------------------------------------------------------------------
+# キャッシュ
+# 起動時にconfig.pyを読み込んでパース結果一式をキャッシュし、以降はハッシュが
+# 一致する限り再パースせずに使い回す。/save や テンプレート適用など、config.py
+# を書き換える操作の直後は force=True で明示的に作り直す。
+# ---------------------------------------------------------------------------
+_CACHE: dict = {"hash": None, "snapshot": None}
+
+
+def _compute_snapshot(text: str) -> dict:
+    curated_keys = [f["key"] for f in CURATED_FIELDS if not f["key"].startswith("_")]
+    values = read_key_values(curated_keys, text)
+    plan_groups = read_plan_list(text)
+    curated_meta = read_line_meta(curated_keys, text)
+    advanced = build_advanced_sections(text)
+    code_log = build_code_log(text)
+
+    field_defs = {}
+    for f in CURATED_FIELDS:
+        if f["kind"] != "diagram":
+            field_defs[f["key"]] = f
+    for sections in advanced.values():
+        for sec in sections:
+            for fmeta in sec["fields"]:
+                if fmeta["meta"]["editable"]:
+                    field_defs[fmeta["key"]] = dict(key=fmeta["key"], kind="raw")
+
+    return dict(
+        text=text, values=values, plan_groups=plan_groups, curated_meta=curated_meta,
+        advanced=advanced, code_log=code_log, field_defs=field_defs,
+    )
+
+
+def get_snapshot(force: bool = False) -> tuple[dict, bool]:
+    """(snapshot, regenerated) を返す。regenerated は今回の呼び出しでキャッシュを
+    作り直したかどうか(config.pyの内容が前回から変わっていたか)。"""
+    text = CONFIG_PATH.read_text(encoding="utf-8")
+    h = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    if not force and _CACHE["hash"] == h and _CACHE["snapshot"] is not None:
+        return _CACHE["snapshot"], False
+    snapshot = _compute_snapshot(text)
+    _CACHE["hash"] = h
+    _CACHE["snapshot"] = snapshot
+    return snapshot, True
+
+
+def invalidate_cache() -> None:
+    _CACHE["hash"] = None
+    _CACHE["snapshot"] = None
+
+
+# ---------------------------------------------------------------------------
+# テンプレート(現在のconfig.pyを任意名で保存・一覧・適用・削除)
+# ---------------------------------------------------------------------------
+def _safe_template_name(name: str) -> str:
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("テンプレート名を入力してください")
+    if not re.fullmatch(r"[\w\-]+", name):
+        raise ValueError("テンプレート名に使えるのは英数字・日本語・_ - のみです(スペースや記号は不可)")
+    return name
+
+
+def list_templates() -> list:
+    TEMPLATES_DIR.mkdir(exist_ok=True)
+    items = []
+    for p in sorted(TEMPLATES_DIR.glob("*.py")):
+        stat = p.stat()
+        items.append(dict(
+            name=p.stem,
+            saved_at=datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+            size=stat.st_size,
+        ))
+    return items
+
+
+def save_template(raw_name: str) -> str:
+    name = _safe_template_name(raw_name)
+    TEMPLATES_DIR.mkdir(exist_ok=True)
+    shutil.copy2(CONFIG_PATH, TEMPLATES_DIR / f"{name}.py")
+    return name
+
+
+def apply_template(raw_name: str) -> Path:
+    name = _safe_template_name(raw_name)
+    src = TEMPLATES_DIR / f"{name}.py"
+    if not src.exists():
+        raise ValueError(f"テンプレート「{name}」が見つかりません")
+    backup_path = _make_backup()
+    shutil.copy2(src, CONFIG_PATH)
+    invalidate_cache()
+    return backup_path
+
+
+def delete_template(raw_name: str) -> None:
+    name = _safe_template_name(raw_name)
+    p = TEMPLATES_DIR / f"{name}.py"
+    if p.exists():
+        p.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -656,13 +782,42 @@ def render_advanced_sections(sections: list[dict]) -> str:
     </details>'''
 
 
+def render_code_log_panel(code_log: dict) -> str:
+    body = ""
+    for cat in CATEGORIES:
+        secs = code_log.get(cat["id"], [])
+        if not secs:
+            continue
+        total_lines = sum(len(s["code"].split("\n")) for s in secs)
+        blocks = ""
+        for s in secs:
+            numbered = "\n".join(
+                f"{s['start_line'] + i:>5} | {line}"
+                for i, line in enumerate(s["code"].split("\n"))
+            )
+            blocks += f'''
+            <div class="codelog-block">
+              <div class="codelog-title">
+                <span>{_html_escape(s["title"])}</span>
+                <span class="codelog-loc">config.py {s["start_line"]}行目〜</span>
+              </div>
+              <pre class="codelog-pre">{_html_escape(numbered)}</pre>
+            </div>'''
+        body += f'''
+        <details class="advanced codelog-category">
+          <summary>{cat["icon"]} {cat["title"]}（約{total_lines}行）</summary>
+          {blocks}
+        </details>'''
+    return body
+
+
 def render_page() -> str:
-    text = CONFIG_PATH.read_text(encoding="utf-8")
-    curated_keys = [f["key"] for f in CURATED_FIELDS if not f["key"].startswith("_")]
-    values = read_key_values(curated_keys, text)
-    plan_groups = read_plan_list(text)
-    curated_meta = read_line_meta(curated_keys, text)
-    advanced = build_advanced_sections(text)
+    snap, _ = get_snapshot()
+    values = snap["values"]
+    plan_groups = snap["plan_groups"]
+    curated_meta = snap["curated_meta"]
+    advanced = snap["advanced"]
+    code_log = snap["code_log"]
 
     tabs_nav = ""
     panels = ""
@@ -691,14 +846,20 @@ def render_page() -> str:
           {advanced_html}
         </section>'''
 
-    # FIELD_META: キュレーション項目 + 詳細設定の編集可能項目をまとめてJSに渡す
-    field_meta_js = {}
-    for f in CURATED_FIELDS:
-        if f["kind"] == "diagram":
-            continue
-        m = curated_meta.get(f["key"])
-        if m:
-            field_meta_js[f["key"]] = dict(kind=f["kind"], **m)
+    # 7個目のタブ: config.pyの実コードをカテゴリ別に読み取り専用で表示
+    tabs_nav += '<button class="tab-btn" data-tab="codelog" onclick="switchTab(\'codelog\')">📄 コード</button>'
+    panels += f'''
+    <section class="tab-panel" id="panel-codelog">
+      <div class="panel-head" style="background:{PALETTE["steel_tint"]}">
+        <h2>📄 コード</h2>
+        <p>config.py の実際のコードを、カテゴリごとにそのまま表示します(読み取り専用)。</p>
+      </div>
+      {render_code_log_panel(code_log)}
+    </section>'''
+
+    field_meta_js = {key: dict(kind=f["kind"], **curated_meta[key])
+                      for key, f in ((f["key"], f) for f in CURATED_FIELDS if f["kind"] != "diagram")
+                      if curated_meta.get(key)}
     for sections in advanced.values():
         for sec in sections:
             for fmeta in sec["fields"]:
@@ -729,7 +890,7 @@ HTML_SHELL = f'''<!doctype html>
   :root {{
     --navy: {PALETTE["navy"]}; --steel: {PALETTE["steel"]}; --steel-soft: {PALETTE["steel_soft"]};
     --cyan: {PALETTE["cyan"]}; --orange: {PALETTE["orange"]}; --card-bg: {PALETTE["card_bg"]};
-    --text-dark: {PALETTE["text_dark"]}; --muted: {PALETTE["muted"]};
+    --text-dark: {PALETTE["text_dark"]}; --muted: {PALETTE["muted"]}; --orange-tint: {PALETTE["orange_tint"]};
   }}
   * {{ box-sizing: border-box; }}
   body {{
@@ -743,6 +904,45 @@ HTML_SHELL = f'''<!doctype html>
   header .eyebrow {{ color: var(--cyan); font-size: 0.75rem; font-weight: 700; letter-spacing: 0.12em; }}
   header h1 {{ margin: 0.3rem 0 0.4rem; font-size: 1.5rem; }}
   header p {{ margin: 0; color: #B9C0D4; font-size: 0.85rem; }}
+  .header-top {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }}
+  .header-actions {{ display: flex; gap: 0.5rem; flex-shrink: 0; }}
+  .ghost-btn {{
+    background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.2); color: #fff;
+    padding: 0.5rem 0.8rem; border-radius: 999px; font-size: 0.78rem; font-weight: 700; cursor: pointer;
+    white-space: nowrap;
+  }}
+  .ghost-btn:hover {{ background: rgba(255,255,255,0.16); }}
+
+  .templates-panel {{
+    margin-top: 1.1rem; background: rgba(255,255,255,0.06); border-radius: 12px; padding: 0.9rem 1rem;
+  }}
+  .templates-save-row {{ display: flex; gap: 0.5rem; margin-bottom: 0.7rem; }}
+  .templates-save-row input {{
+    flex: 1; padding: 0.5rem 0.7rem; border-radius: 8px; border: 1px solid rgba(255,255,255,0.25);
+    background: rgba(255,255,255,0.08); color: #fff; font-size: 0.85rem;
+  }}
+  .templates-save-row input::placeholder {{ color: #8891A5; }}
+  .templates-save-row button {{
+    background: var(--orange); color: #fff; border: none; padding: 0.5rem 0.9rem; border-radius: 8px;
+    font-size: 0.8rem; font-weight: 700; cursor: pointer; white-space: nowrap;
+  }}
+  .templates-empty {{ color: #8891A5; font-size: 0.8rem; margin: 0.3rem 0; }}
+  .template-row {{
+    display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0;
+    border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 0.85rem;
+  }}
+  .template-row:last-child {{ border-bottom: none; }}
+  .template-meta {{ display: block; color: #8891A5; font-size: 0.72rem; margin-top: 0.1rem; }}
+  .template-row button {{
+    background: none; border: 1px solid rgba(255,255,255,0.25); color: #fff; padding: 0.3rem 0.6rem;
+    border-radius: 6px; font-size: 0.75rem; cursor: pointer; margin-left: 0.4rem;
+  }}
+  .template-row button.danger {{ border-color: var(--orange); color: var(--orange); }}
+
+  .change-badge {{
+    background: var(--orange); color: #fff; font-size: 0.75rem; font-weight: 700;
+    padding: 0.35rem 0.7rem; border-radius: 999px; white-space: nowrap;
+  }}
 
   .tabs-nav {{
     position: sticky; top: 0; z-index: 5; background: #fff; border-bottom: 1px solid #E4E7F0;
@@ -814,6 +1014,13 @@ HTML_SHELL = f'''<!doctype html>
   .field-code .code-new {{ color: var(--orange); font-weight: 700; }}
   .field-code.changed {{ outline: 1px solid var(--orange); }}
 
+  /* 変更あり項目の強調(項目全体) */
+  .field.changed {{
+    background: var(--orange-tint); border-radius: 10px; box-shadow: inset 3px 0 0 var(--orange);
+    padding-left: 0.8rem; margin-left: -0.8rem;
+  }}
+  tr.changed td {{ background: var(--orange-tint); }}
+
   /* センサー配置図 */
   .car-diagram-wrap {{ display: flex; justify-content: center; padding: 0.4rem 0 0.2rem; }}
   #car-svg {{ width: 100%; max-width: 220px; height: auto; }}
@@ -858,6 +1065,20 @@ HTML_SHELL = f'''<!doctype html>
     font-family: "SF Mono", "Menlo", "Consolas", monospace; font-size: 0.78rem; color: var(--text-dark);
   }}
 
+  /* コードログタブ */
+  .codelog-category {{ margin-bottom: 1rem; }}
+  .codelog-block {{ margin: 0 0 1.1rem; }}
+  .codelog-title {{
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-weight: 700; font-size: 0.82rem; color: var(--text-dark); margin-bottom: 0.35rem;
+  }}
+  .codelog-loc {{ font-weight: 400; font-size: 0.7rem; color: var(--muted); }}
+  .codelog-pre {{
+    background: var(--navy); color: #C7CEDE; border-radius: 8px; padding: 0.8rem 0.9rem;
+    font-family: "SF Mono", "Menlo", "Consolas", monospace; font-size: 0.72rem; line-height: 1.55;
+    overflow-x: auto; white-space: pre; margin: 0;
+  }}
+
   .savebar {{
     position: fixed; left: 0; right: 0; bottom: 0; background: #fff;
     border-top: 1px solid #E4E7F0; padding: 0.9rem 1.2rem; display: flex; align-items: center;
@@ -882,9 +1103,24 @@ HTML_SHELL = f'''<!doctype html>
 </head>
 <body>
 <header>
-  <div class="eyebrow">TOGIKAIDRIVE · CONFIG EDITOR</div>
-  <h1>設定エディタ</h1>
-  <p>config.py 全480項目を、ミニカーの処理カテゴリ別にまとめて安全に編集します。</p>
+  <div class="header-top">
+    <div>
+      <div class="eyebrow">TOGIKAIDRIVE · CONFIG EDITOR</div>
+      <h1>設定エディタ</h1>
+      <p>config.py 全480項目を、ミニカーの処理カテゴリ別にまとめて安全に編集します。</p>
+    </div>
+    <div class="header-actions">
+      <button id="reload-btn" class="ghost-btn" title="config.pyの内容が変わっていないか確認して再読み込みします">🔄 再読み込み</button>
+      <button id="templates-btn" class="ghost-btn">📋 テンプレート</button>
+    </div>
+  </div>
+  <div id="templates-panel" class="templates-panel" hidden>
+    <div class="templates-save-row">
+      <input type="text" id="template-name-input" placeholder="テンプレート名(例: 予選用)">
+      <button id="template-save-btn">現在の設定を保存</button>
+    </div>
+    <div id="templates-list"></div>
+  </div>
 </header>
 <nav class="tabs-nav">__TABS_NAV__</nav>
 <div id="toast"></div>
@@ -892,6 +1128,7 @@ HTML_SHELL = f'''<!doctype html>
 __PANELS__
 </main>
 <div class="savebar">
+  <span id="change-counter" class="change-badge" hidden></span>
   <span class="path">対象: __CONFIG_PATH__</span>
   <button id="save">変更を保存</button>
 </div>
@@ -972,6 +1209,19 @@ function getCurrentValue(key) {{
   return el.value;
 }}
 
+const CHANGED_KEYS = new Set();
+
+function updateChangeCounter() {{
+  const el = document.getElementById('change-counter');
+  if (!el) return;
+  if (CHANGED_KEYS.size === 0) {{
+    el.hidden = true;
+  }} else {{
+    el.hidden = false;
+    el.textContent = `変更: ${{CHANGED_KEYS.size}}件`;
+  }}
+}}
+
 function refreshCodePreview(key) {{
   const box = document.getElementById('code-' + key);
   const meta = FIELD_META[key];
@@ -986,16 +1236,25 @@ function refreshCodePreview(key) {{
   }}
   const comment = meta.comment ? '  ' + meta.comment : '';
   const newLine = meta.prefix + newLiteral + comment;
+  const isChanged = newLine !== meta.full;
 
-  if (newLine === meta.full) {{
-    box.classList.remove('changed');
-    box.innerHTML = `<span class="code-loc">config.py ${{meta.line}}行目</span><code class="code-cur">${{escapeHtml(meta.full)}}</code>`;
-  }} else {{
+  // 項目全体(カード or 詳細設定の行)を目立たせる。差分プレビューは
+  // 「入力・選択するたび」に、ここで毎回リアルタイムに更新される。
+  const container = box.closest('.field') || box.closest('tr');
+  if (container) container.classList.toggle('changed', isChanged);
+
+  if (isChanged) {{
+    CHANGED_KEYS.add(key);
     box.classList.add('changed');
     box.innerHTML = `<span class="code-loc">config.py ${{meta.line}}行目 (変更あり)</span>` +
       `<code class="code-old">${{escapeHtml(meta.full)}}</code>` +
       `<code class="code-new">${{escapeHtml(newLine)}}</code>`;
+  }} else {{
+    CHANGED_KEYS.delete(key);
+    box.classList.remove('changed');
+    box.innerHTML = `<span class="code-loc">config.py ${{meta.line}}行目</span><code class="code-cur">${{escapeHtml(meta.full)}}</code>`;
   }}
+  updateChangeCounter();
 }}
 
 function escapeHtml(s) {{
@@ -1119,7 +1378,11 @@ document.getElementById('save').addEventListener('click', async () => {{
     }});
     const data = await res.json();
     if (data.ok) {{
-      showToast('保存しました（バックアップ: ' + data.backup + '）', false);
+      showToast('保存しました（バックアップ: ' + data.backup + '）。反映のため再読み込みします…', false);
+      // 保存後は値がconfig.pyの新しい基準値になるため、ページごと再読み込みして
+      // 差分プレビュー・変更件数カウンターをまっさらな状態に揃える
+      setTimeout(() => location.reload(), 1000);
+      return;
     }} else {{
       showToast(data.message || '保存に失敗しました', true);
       if (data.field) {{
@@ -1134,6 +1397,113 @@ document.getElementById('save').addEventListener('click', async () => {{
     btn.textContent = '変更を保存';
   }}
 }});
+
+// ---------------------------------------------------------------------
+// 再読み込み(キャッシュのハッシュ確認)
+// ---------------------------------------------------------------------
+document.getElementById('reload-btn').addEventListener('click', async () => {{
+  try {{
+    const res = await fetch('/reload');
+    const data = await res.json();
+    showToast(
+      data.regenerated ? 'config.pyの変更を検知し、再読み込みしました' : '変更なし（キャッシュを利用しています）',
+      false
+    );
+    setTimeout(() => location.reload(), 900);
+  }} catch (e) {{
+    showToast('再読み込みに失敗しました: ' + e, true);
+  }}
+}});
+
+// ---------------------------------------------------------------------
+// テンプレート(現在の設定を任意名で保存・一覧・適用・削除)
+// ---------------------------------------------------------------------
+document.getElementById('templates-btn').addEventListener('click', () => {{
+  const panel = document.getElementById('templates-panel');
+  panel.hidden = !panel.hidden;
+  if (!panel.hidden) loadTemplates();
+}});
+
+async function loadTemplates() {{
+  const list = document.getElementById('templates-list');
+  list.innerHTML = '<p class="templates-empty">読み込み中…</p>';
+  try {{
+    const res = await fetch('/templates');
+    const data = await res.json();
+    if (!data.templates.length) {{
+      list.innerHTML = '<p class="templates-empty">まだテンプレートがありません</p>';
+      return;
+    }}
+    list.innerHTML = data.templates.map(t => `
+      <div class="template-row">
+        <div><strong>${{escapeHtml(t.name)}}</strong><span class="template-meta">${{escapeHtml(t.saved_at)}}</span></div>
+        <div>
+          <button onclick="applyTemplate('${{escapeHtml(t.name)}}')">適用</button>
+          <button class="danger" onclick="deleteTemplate('${{escapeHtml(t.name)}}')">削除</button>
+        </div>
+      </div>
+    `).join('');
+  }} catch (e) {{
+    list.innerHTML = '<p class="templates-empty">読み込みに失敗しました</p>';
+  }}
+}}
+
+document.getElementById('template-save-btn').addEventListener('click', async () => {{
+  const nameInput = document.getElementById('template-name-input');
+  const name = nameInput.value.trim();
+  if (!name) {{ showToast('テンプレート名を入力してください', true); return; }}
+  try {{
+    const res = await fetch('/templates/save', {{
+      method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{name}}),
+    }});
+    const data = await res.json();
+    if (data.ok) {{
+      showToast(`テンプレート「${{name}}」を保存しました`, false);
+      nameInput.value = '';
+      loadTemplates();
+    }} else {{
+      showToast(data.message || '保存に失敗しました', true);
+    }}
+  }} catch (e) {{
+    showToast('通信エラー: ' + e, true);
+  }}
+}});
+
+async function applyTemplate(name) {{
+  if (!confirm(`テンプレート「${{name}}」を適用します。現在のconfig.pyの内容は上書きされます(直前の状態はバックアップされます)。よろしいですか？`)) return;
+  try {{
+    const res = await fetch('/templates/apply', {{
+      method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{name}}),
+    }});
+    const data = await res.json();
+    if (data.ok) {{
+      showToast('適用しました（バックアップ: ' + data.backup + '）', false);
+      setTimeout(() => location.reload(), 900);
+    }} else {{
+      showToast(data.message || '適用に失敗しました', true);
+    }}
+  }} catch (e) {{
+    showToast('通信エラー: ' + e, true);
+  }}
+}}
+
+async function deleteTemplate(name) {{
+  if (!confirm(`テンプレート「${{name}}」を削除します。よろしいですか？`)) return;
+  try {{
+    const res = await fetch('/templates/delete', {{
+      method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{name}}),
+    }});
+    const data = await res.json();
+    if (data.ok) {{
+      showToast('削除しました', false);
+      loadTemplates();
+    }} else {{
+      showToast(data.message || '削除に失敗しました', true);
+    }}
+  }} catch (e) {{
+    showToast('通信エラー: ' + e, true);
+  }}
+}}
 </script>
 </body>
 </html>'''
@@ -1142,26 +1512,22 @@ document.getElementById('save').addEventListener('click', async () => {{
 # ---------------------------------------------------------------------------
 # サーバー
 # ---------------------------------------------------------------------------
-def _all_field_defs() -> dict:
-    """key -> {kind, ...(min/max/optionsなど)} を、キュレーション+詳細設定の両方から作る(POST検証用)。"""
-    text = CONFIG_PATH.read_text(encoding="utf-8")
-    defs = {}
-    for f in CURATED_FIELDS:
-        if f["kind"] == "diagram":
-            continue
-        defs[f["key"]] = f
-    advanced = build_advanced_sections(text)
-    for sections in advanced.values():
-        for sec in sections:
-            for fmeta in sec["fields"]:
-                if fmeta["meta"]["editable"]:
-                    defs[fmeta["key"]] = dict(key=fmeta["key"], kind="raw")
-    return defs
-
-
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # 標準出力を静かに保つ
+
+    def _send_json(self, status: int, payload: dict) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _read_json_body(self) -> dict:
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length else b""
+        return json.loads(raw.decode("utf-8")) if raw else {}
 
     def do_GET(self):
         if self.path in ("/", "/index.html"):
@@ -1171,6 +1537,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path == "/reload":
+            _snap, regenerated = get_snapshot(force=False)
+            self._send_json(200, dict(ok=True, regenerated=regenerated))
+        elif self.path == "/templates":
+            self._send_json(200, dict(ok=True, templates=list_templates()))
         elif self.path == "/favicon.ico":
             self.send_response(204)
             self.end_headers()
@@ -1179,40 +1550,45 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        if self.path != "/save":
-            self.send_response(404)
-            self.end_headers()
-            return
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length)
         try:
-            posted = json.loads(raw.decode("utf-8"))
-            field_defs = _all_field_defs()
-            new_values = {}
-            kinds = {}
-            for key, value in posted.items():
-                field = field_defs.get(key)
-                if not field:
-                    continue  # 未知のキーは無視(古いページ/改ざん対策)
-                kind = field["kind"]
-                new_values[key] = validate(kind, key, value, field)
-                kinds[key] = kind
-            backup = write_values(new_values, kinds, field_defs)
-            response = dict(ok=True, backup=backup.name)
-            status = 200
-        except ValueError as e:
-            response = dict(ok=False, message=str(e))
-            status = 400
-        except Exception as e:  # noqa: BLE001
-            response = dict(ok=False, message=f"予期しないエラー: {e}")
-            status = 500
+            posted = self._read_json_body()
 
-        body = json.dumps(response).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+            if self.path == "/save":
+                snap, _ = get_snapshot()
+                field_defs = snap["field_defs"]
+                new_values = {}
+                kinds = {}
+                for key, value in posted.items():
+                    field = field_defs.get(key)
+                    if not field:
+                        continue  # 未知のキーは無視(古いページ/改ざん対策)
+                    kind = field["kind"]
+                    new_values[key] = validate(kind, key, value, field)
+                    kinds[key] = kind
+                backup = write_values(new_values, kinds, field_defs)
+                get_snapshot(force=True)  # 書き込み直後にキャッシュを作り直しておく
+                self._send_json(200, dict(ok=True, backup=backup.name))
+
+            elif self.path == "/templates/save":
+                name = save_template(posted.get("name", ""))
+                self._send_json(200, dict(ok=True, name=name))
+
+            elif self.path == "/templates/apply":
+                backup = apply_template(posted.get("name", ""))
+                self._send_json(200, dict(ok=True, backup=backup.name))
+
+            elif self.path == "/templates/delete":
+                delete_template(posted.get("name", ""))
+                self._send_json(200, dict(ok=True))
+
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        except ValueError as e:
+            self._send_json(400, dict(ok=False, message=str(e)))
+        except Exception as e:  # noqa: BLE001
+            self._send_json(500, dict(ok=False, message=f"予期しないエラー: {e}"))
 
 
 def local_ip() -> str:
@@ -1230,10 +1606,15 @@ def main():
     if not CONFIG_PATH.exists():
         raise SystemExit(f"config.py が見つかりません: {CONFIG_PATH}")
 
+    TEMPLATES_DIR.mkdir(exist_ok=True)
+    get_snapshot(force=True)  # 起動時にキャッシュを作成しておく
+
     with ThreadingHTTPServer(("0.0.0.0", PORT), Handler) as httpd:
         print("=" * 60)
         print("togikaidrive 設定エディタ を起動しました")
         print(f"  対象ファイル: {CONFIG_PATH}")
+        print(f"  キャッシュ:    作成完了")
+        print(f"  テンプレート: {TEMPLATES_DIR}")
         print(f"  ローカル:      http://localhost:{PORT}")
         print(f"  同一ネットワーク: http://{local_ip()}:{PORT}")
         print("  Ctrl+C で終了")
