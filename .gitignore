@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+node_modules/
+.DS_Store
+*.bak.*
+config.py.bak.*
+
+# 外部組織のtogikaidrive-devリポジトリのクローン・コピー(巨大 & 別リポジトリ。手を加えない方針)
+togikaidrive-dev/
+togikaidrive-devのコピー/
+
+# 講座・レギュレーション資料PDF(このリポジトリでは管理しない)
+*.pdf
+
+# togikaidrive-config-editorが実行時に作るテンプレート保存先
+togikaidrive-config-editor/templates/
