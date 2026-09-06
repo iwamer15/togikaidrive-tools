@@ -22,6 +22,8 @@ python3 server.py
 1. **ライブテスト** — ステアリング/スロットルそれぞれ -1〜1 のスライダー。動かすたびに現在の `config.py` の値で実際にどう動くかを試せる。常時表示の「■ 停止」ボタンで即座に中立へ戻せる。
 2. **ステアリング校正** — 生のPWM値を入力して「送信(テスト)」で実機を動かし(`motor.py` のウィザードと同じ操作感)、良い値が見つかったら「これを中央にする」/「これを左右どちらかの最大にする」で確定する。最大値を確定すると `STEERING_WIDTH_PWM = |値 - 中央|` が自動計算される。
 3. **スロットル校正** — 同様に生PWM値をテスト送信し、「これを停止(ニュートラル)にする」「これを前進最大にする」「これを後退最大にする」でそれぞれ個別に確定する(このconfig.pyでは3値は対称ではなく独立した実測値のため)。
+
+ステアリング校正・スロットル校正の各カードには、[togikaidrive-config-editor](../togikaidrive-config-editor) の「コード」タブと同じ発想で、**そのページを開いた時点の`config.py`の実際のコード**(該当箇所を空行区切りでひとかたまりに切り出したもの・行番号付き)をそのまま表示する。今どの行を書き換えようとしているのかが常に見える。
 4. **確定した値** — 5項目(`STEERING_CENTER_PWM` / `STEERING_WIDTH_PWM` / `THROTTLE_STOPPED_PWM` / `THROTTLE_FORWARD_PWM` / `THROTTLE_REVERSE_PWM`)の現在値→新しい値を一覧表示。「config.pyに保存」を押すまではファイルには一切書き込まれない。
 
 `STEERING_RIGHT_PWM` / `STEERING_LEFT_PWM` は `config.py` 内で `STEERING_CENTER_PWM ± STEERING_WIDTH_PWM` の計算式になっているため、この2項目だけを書き込めば自動的に追従する。

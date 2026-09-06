@@ -111,6 +111,39 @@ def get_current_values() -> dict:
     return config_editor.read_key_values(list(VALID_RANGES.keys()), text)
 
 
+def extract_code_block(text: str, key: str) -> dict | None:
+    """key が定義されている行を中心に、空行で区切られた「ひとかたまり」を
+    そのまま切り出す(config editorのコードタブと同じ発想。コメント文言に
+    依存せず、config.py自身の段落構造から自動で範囲を決める)。"""
+    m = config_editor._line_pattern(key).search(text)
+    if not m:
+        return None
+    lines = text.split("\n")
+    line_no = text.count("\n", 0, m.start())  # 0-indexed
+    start = line_no
+    while start > 0 and lines[start - 1].strip() != "":
+        start -= 1
+    end = line_no
+    while end + 1 < len(lines) and lines[end + 1].strip() != "":
+        end += 1
+    return dict(start_line=start + 1, code="\n".join(lines[start:end + 1]))
+
+
+def render_code_block(text: str, key: str) -> str:
+    block = extract_code_block(text, key)
+    if block is None:
+        return ""
+    numbered = "\n".join(
+        f"{block['start_line'] + i:>5} | {line}"
+        for i, line in enumerate(block["code"].split("\n"))
+    )
+    return (
+        f'<div class="codelog-title"><span>config.pyの現在のコード</span>'
+        f'<span class="codelog-loc">config.py {block["start_line"]}行目〜</span></div>'
+        f'<pre class="codelog-pre">{config_editor._html_escape(numbered)}</pre>'
+    )
+
+
 def write_motor_values(values: dict) -> Path:
     text = config_editor.CONFIG_PATH.read_text(encoding="utf-8")
     backup_path = config_editor._make_backup()
@@ -155,7 +188,8 @@ def validate_save_values(posted: dict) -> dict:
 # HTML
 # ---------------------------------------------------------------------------
 def render_page() -> str:
-    current = get_current_values()
+    text = config_editor.CONFIG_PATH.read_text(encoding="utf-8")
+    current = config_editor.read_key_values(list(VALID_RANGES.keys()), text)
     status_html = (
         f'<span class="hw-badge hw-on">🟢 実機接続中</span>'
         if HARDWARE_AVAILABLE else
@@ -167,6 +201,8 @@ def render_page() -> str:
         .replace("__CONFIG_PATH__", str(config_editor.CONFIG_PATH))
         .replace("__CURRENT_VALUES__", json.dumps(current, ensure_ascii=False))
         .replace("__FIELD_LABELS__", json.dumps(FIELD_LABELS, ensure_ascii=False))
+        .replace("__STEERING_CODE__", render_code_block(text, "STEERING_CENTER_PWM"))
+        .replace("__THROTTLE_CODE__", render_code_block(text, "THROTTLE_STOPPED_PWM"))
     )
 
 
@@ -225,6 +261,17 @@ HTML_SHELL = f'''<!doctype html>
     padding: 0.55rem 0.7rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; cursor: pointer;
   }}
   .lock-buttons button:hover {{ background: #E9ECF3; }}
+
+  .codelog-title {{
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-weight: 700; font-size: 0.78rem; color: var(--text-dark); margin: 0.9rem 0 0.35rem;
+  }}
+  .codelog-loc {{ font-weight: 400; font-size: 0.68rem; color: var(--muted); }}
+  .codelog-pre {{
+    background: var(--navy); color: #C7CEDE; border-radius: 8px; padding: 0.8rem 0.9rem;
+    font-family: "SF Mono", "Menlo", "Consolas", monospace; font-size: 0.72rem; line-height: 1.55;
+    overflow-x: auto; white-space: pre; margin: 0 0 1rem;
+  }}
 
   table.summary {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; }}
   table.summary th {{ text-align: left; color: var(--muted); font-weight: 700; font-size: 0.75rem; padding: 0.3rem 0.4rem; }}
@@ -286,6 +333,7 @@ HTML_SHELL = f'''<!doctype html>
   <section class="card">
     <h2>ステアリング校正</h2>
     <p class="card-sub">生のPWM値を送って試し、良い値が見つかったら「確定」する(motor.pyの調整ウィザードと同じ操作)。</p>
+    __STEERING_CODE__
     <div class="raw-row">
       <input type="number" id="steering-raw-input" placeholder="例: 430" min="100" max="600">
       <button onclick="testRaw('steering')">送信(テスト)</button>
@@ -299,6 +347,7 @@ HTML_SHELL = f'''<!doctype html>
   <section class="card">
     <h2>スロットル校正</h2>
     <p class="card-sub">停止・前進最大・後退最大を、それぞれ個別に確定する。</p>
+    __THROTTLE_CODE__
     <div class="raw-row">
       <input type="number" id="throttle-raw-input" placeholder="例: 380" min="100" max="600">
       <button onclick="testRaw('throttle')">送信(テスト)</button>
