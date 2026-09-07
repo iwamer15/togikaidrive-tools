@@ -383,6 +383,10 @@ def read_line_meta(keys: list[str], text: str) -> dict:
             line=line_no,
             prefix=m.group(1),
             comment=(m.group(3) or "").strip(),
+            # コメント前の空白(行ごとに揃っていないことがある)をそのまま保持する。
+            # JS側の変更判定はこれを使って行を再構築するので、表示用に strip() した
+            # comment とは別に持つ。
+            comment_raw=m.group(3) or "",
             full=m.group(0),
             raw=raw,
             editable=editable,
@@ -1392,7 +1396,10 @@ function refreshCodePreview(key) {{
   }} catch (e) {{
     return;
   }}
-  const comment = meta.comment ? '  ' + meta.comment : '';
+  // meta.comment_raw はコメント前の元の空白をそのまま含む(行ごとにスペース数が
+  // 違うことがあるため、ここで固定幅にすると値を変えていない行まで「変更あり」に
+  // なってしまう)。
+  const comment = meta.comment_raw || '';
   const newLine = meta.prefix + newLiteral + comment;
   const isChanged = newLine !== meta.full;
 
@@ -1775,6 +1782,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            # 毎回config.pyを読み直して最新値を表示する設計なので、ブラウザ側の
+            # HTTPキャッシュで古いページが再利用されないようにする
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
             self.end_headers()
             self.wfile.write(body)
         elif self.path == "/reload":
