@@ -21,6 +21,7 @@ config.py(480項目・1281行の生Pythonファイル)を、ミニカーの処�
 from __future__ import annotations
 
 import ast
+import base64
 import hashlib
 import html
 import importlib
@@ -1110,6 +1111,92 @@ def render_planner_test_widget() -> str:
     </script>'''
 
 
+def list_trained_models() -> list[dict]:
+    """config.py の MODEL_DIR 配下の学習済みモデル(*.pth)を新しい順に一覧化する。
+    train_pytorch.py の save_model()/train_model() を読んで確認した通り、Lossグラフは
+    <モデルファイル名>_loss.png という名前のPNGとしてのみ保存される(生データは無い)ため、
+    torchでチェックポイントの中身を読むことはせず、ファイル一覧・サイズ・更新日時・
+    対応するPNG画像の表示だけで完結させる(このウィジェットはtorch非依存)。"""
+    text = CONFIG_PATH.read_text(encoding="utf-8")
+    values = read_key_values(["MODEL_DIR", "MODEL_NAME"], text)
+    model_dir_value = values.get("MODEL_DIR") or "models"
+    model_dir_path = Path(model_dir_value)
+    if not model_dir_path.is_absolute():
+        model_dir_path = TOGIKAIDRIVE_DEV_DIR / model_dir_path
+    if not model_dir_path.is_dir():
+        return []
+
+    current_name = values.get("MODEL_NAME")
+    pth_files = sorted(model_dir_path.glob("*.pth"), key=lambda p: p.stat().st_mtime, reverse=True)
+    result = []
+    for pth in pth_files:
+        loss_png = model_dir_path / f"{pth.name}_loss.png"
+        entry = dict(
+            name=pth.name,
+            size_kb=round(pth.stat().st_size / 1024, 1),
+            mtime=datetime.datetime.fromtimestamp(pth.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+            is_current=(pth.name == current_name),
+            loss_png_data_uri=None,
+        )
+        if loss_png.is_file():
+            try:
+                data = loss_png.read_bytes()
+                entry["loss_png_data_uri"] = "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+            except Exception:  # noqa: BLE001  -- 画像が読めなくても一覧自体は表示する
+                pass
+        result.append(entry)
+    return result
+
+
+def render_training_results_widget() -> str:
+    """「判断」カテゴリの末尾(MODEL_NAMEフィールドの直後)に差し込む学習結果ウィジェット。
+    SSH接続だとLossグラフのPNGを見るのにFileZilla等でコピーする必要がある、という講座資料にも
+    ある手間を、ブラウザで直接表示することで解消する。「このモデルを使う」は既存のMODEL_NAME
+    フィールドに値をセットするだけで、config.pyへの書き込みは他のフィールドと同じく
+    ページ下部の「変更を保存」を押すまで行われない(専用の保存経路は持たない)。"""
+    models = list_trained_models()
+    if not models:
+        body = '<p class="field-help">まだ学習済みモデルがありません(学習実行パネルで学習すると、ここに一覧表示されます)。</p>'
+    else:
+        cards = ""
+        for m in models:
+            badge = ' <span class="hw-badge hw-on">現在使用中</span>' if m["is_current"] else ""
+            if m["loss_png_data_uri"]:
+                img_html = f'<img src="{m["loss_png_data_uri"]}" alt="Loss推移グラフ" class="model-loss-img">'
+            else:
+                img_html = '<p class="field-help">Lossグラフ(_loss.png)が見つかりません</p>'
+            cards += f'''
+            <div class="model-card">
+              <div class="model-card-head">
+                <div>
+                  <b>{_html_escape(m["name"])}</b>{badge}
+                  <div class="field-help" style="margin:0.2rem 0 0;">{m["size_kb"]} KB ・ {_html_escape(m["mtime"])}</div>
+                </div>
+                <button type="button" onclick="useTrainedModel('{_html_escape(m["name"])}')">このモデルを使う</button>
+              </div>
+              {img_html}
+            </div>'''
+        body = cards
+    return f'''
+    <div class="motor-widget">
+      <div class="motor-widget-head"><h3>📊 学習済みモデル</h3></div>
+      <p class="field-help">
+        Lossグラフをブラウザで直接確認できます(SSH越しにFileZilla等でコピーする必要はありません)。
+        「このモデルを使う」を押すとMODEL_NAMEに反映されますが、<b>ページ下部の「変更を保存」を押すまではconfig.pyには書き込まれません。</b>
+      </p>
+      {body}
+    </div>
+    <script>
+      function useTrainedModel(name) {{
+        const el = document.querySelector('[name="MODEL_NAME"]');
+        if (!el) return;
+        el.value = name;
+        refreshCodePreview('MODEL_NAME');
+        showToast('MODEL_NAME を ' + name + ' に設定しました(まだ保存されていません)', false);
+      }}
+    </script>'''
+
+
 def render_advanced_sections(sections: list[dict]) -> str:
     if not sections:
         return ""
@@ -1209,7 +1296,7 @@ def render_page() -> str:
         if cat["id"] == "control":
             fields_html = render_motor_calibration_widget() + fields_html
         if cat["id"] == "decision":
-            fields_html = render_planner_test_widget() + fields_html
+            fields_html = render_planner_test_widget() + fields_html + render_training_results_widget()
         advanced_html = render_advanced_sections(advanced.get(cat["id"], []))
 
         panels += f'''
@@ -1435,6 +1522,15 @@ HTML_SHELL = f'''<!doctype html>
   }}
   .planner-result {{ margin-top: 0.8rem; }}
   .planner-result table.summary {{ margin-bottom: 0.6rem; }}
+
+  /* 学習結果ウィジェット */
+  .model-card {{ background: var(--card-bg); border-radius: 12px; padding: 0.9rem 1rem; margin-bottom: 0.8rem; }}
+  .model-card-head {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 0.8rem; }}
+  .model-card-head button {{
+    background: var(--steel); color: #fff; border: none; padding: 0.5rem 0.8rem; border-radius: 8px;
+    font-size: 0.78rem; font-weight: 700; cursor: pointer; white-space: nowrap;
+  }}
+  .model-loss-img {{ display: block; max-width: 100%; border-radius: 8px; margin-top: 0.6rem; }}
 
   /* センサー配置図 */
   .car-diagram-wrap {{ display: flex; justify-content: center; padding: 0.4rem 0 0.2rem; }}
