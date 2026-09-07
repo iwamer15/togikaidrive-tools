@@ -23,6 +23,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import html
+import importlib
 import json
 import re
 import shutil
@@ -605,6 +606,132 @@ def init_motor() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 判断ロジック(planner.py)のライブテスト
+# 「判断」カテゴリのウィジェットで使う。センサー値・config.pyの値だけで完結する
+# 純粋なロジック(right_left_3/right_left_3_records/wall_follow/wall_follow_pid)
+# だけを対象とし、カメラ・AIモデルを使う判断ロジックは対象外(実データが要るため)。
+# planner.py は torch 等の重い依存を読み込むため、開発機ではインポート自体が失敗
+# しうる。motor.pyと違い数値ロジックのモックは作らない(別実装すると本体とズレて
+# 壊れたまま気づかないリスクがあるため)。読み込めない場合はウィジェットを
+# 無効表示にするだけに留める。
+# ---------------------------------------------------------------------------
+PLANNER_AVAILABLE = False
+PLANNER_IMPORT_ERROR = ""
+planner_instance = None
+planner_module_ref = None  # Planner()の再生成(状態リセット)用
+config_module_ref = None   # planner.pyが参照するのと同じ config モジュール(sys.modules経由で共有)
+
+
+def init_planner() -> None:
+    global PLANNER_AVAILABLE, PLANNER_IMPORT_ERROR, planner_instance, planner_module_ref, config_module_ref
+    try:
+        sys.path.insert(0, str(TOGIKAIDRIVE_DEV_DIR))
+        import planner as planner_module  # noqa: E402  (togikaidrive-dev/planner.py)
+        import config as _config_module  # noqa: E402  (planner.py内のimport configと同じsys.modulesを共有)
+        planner_instance = planner_module.Planner()
+        planner_module_ref = planner_module
+        config_module_ref = _config_module
+        PLANNER_AVAILABLE = True
+        print("planner.pyを読み込みました(判断ロジックのライブテストが利用可能)")
+    except Exception as e:  # noqa: BLE001  -- torch等の依存が無い開発機では失敗しうる
+        PLANNER_IMPORT_ERROR = f"{type(e).__name__}: {e}"
+        planner_instance = None
+        PLANNER_AVAILABLE = False
+        print(f"planner.pyを読み込めなかったため、判断ロジックのライブテストは無効です({PLANNER_IMPORT_ERROR})")
+
+
+def reset_planner() -> None:
+    """PID積分項・移動平均などの内部状態をリセットする(再インスタンス化するだけ)。"""
+    global planner_instance
+    if PLANNER_AVAILABLE and planner_module_ref is not None:
+        planner_instance = planner_module_ref.Planner()
+
+
+# センサー引数名 -> ラベル(UIと/planner/test両方で使う)
+PLANNER_FUNCTIONS = {
+    "right_left_3": dict(
+        label="直進判断(前方3センサー)",
+        args=["dis_FrLH", "dis_FrFR", "dis_FrRH"],
+        needs_side=False,
+    ),
+    "right_left_3_records": dict(
+        label="直進判断(平滑化・過去値の移動平均)",
+        args=["dis_FrLH", "dis_FrFR", "dis_FrRH"],
+        needs_side=False,
+    ),
+    "wall_follow": dict(
+        label="壁沿い走行",
+        args=["dis_front", "dis_front_side", "dis_rear_side"],
+        needs_side=True,
+    ),
+    "wall_follow_pid": dict(
+        label="壁沿い走行(PID)",
+        args=["ultrasonic_front", "ultrasonic_front_side", "ultrasonic_rear_side"],
+        needs_side=True,
+    ),
+}
+
+# /planner/test で一時上書きを許可するconfig値(判断ロジックが参照するパラメータのみ)
+PLANNER_OVERRIDABLE_CONFIG_KEYS = {
+    "K_P": float, "K_I": float, "K_D": float,
+    "TARGET_RANGE": float, "TARGET_RANGE_ADJUSTMENT": float,
+    "DETECTION_RANGE": float, "RIGHT_LEFT_RANGE": float,
+    "FORWARD_STRAIGHT": float, "FORWARD_CORNER": float,
+}
+
+
+def run_planner_function(func_name: str, side: str | None, distances: dict, overrides: dict) -> dict:
+    if not PLANNER_AVAILABLE:
+        raise ValueError("planner.pyが読み込まれていないため、テストできません")
+    spec = PLANNER_FUNCTIONS.get(func_name)
+    if not spec:
+        raise ValueError(f"不明な関数です: {func_name}")
+    if spec["needs_side"] and side not in ("right", "left"):
+        raise ValueError("side は 'right' か 'left' を指定してください")
+
+    args = []
+    for arg_name in spec["args"]:
+        if arg_name not in distances:
+            raise ValueError(f"{arg_name} を入力してください")
+        try:
+            args.append(float(distances[arg_name]))
+        except (TypeError, ValueError):
+            raise ValueError(f"{arg_name} は数値で入力してください")
+
+    # importlib.reload で直前に保存されたconfig.pyの値をまず反映してから、
+    # 画面上の未保存の候補値があれば一時的に上書きする(呼び出し後は必ず元に戻す)
+    importlib.reload(config_module_ref)
+    saved_values = {}
+    try:
+        for key, value in (overrides or {}).items():
+            if key not in PLANNER_OVERRIDABLE_CONFIG_KEYS:
+                continue
+            caster = PLANNER_OVERRIDABLE_CONFIG_KEYS[key]
+            saved_values[key] = getattr(config_module_ref, key, None)
+            setattr(config_module_ref, key, caster(value))
+
+        if spec["needs_side"]:
+            steering, throttle = getattr(planner_instance, func_name)(*args, side)
+        else:
+            steering, throttle = getattr(planner_instance, func_name)(*args)
+
+        result = dict(steering=steering, throttle=throttle)
+        if func_name == "wall_follow_pid":
+            result["pid_terms"] = dict(
+                P=config_module_ref.K_P * (planner_instance.minimum_distance_current - config_module_ref.TARGET_RANGE),
+                I=config_module_ref.K_I * planner_instance.integral_delta_distance,
+                D=config_module_ref.K_D * (
+                    (planner_instance.minimum_distance_current - planner_instance.minimum_distance_before)
+                    / max(planner_instance.time_current - planner_instance.time_before, 1e-9)
+                ),
+            )
+        return result
+    finally:
+        for key, value in saved_values.items():
+            setattr(config_module_ref, key, value)
+
+
+# ---------------------------------------------------------------------------
 # キャッシュ
 # 起動時にconfig.pyを読み込んでパース結果一式をキャッシュし、以降はハッシュが
 # 一致する限り再パースせずに使い回す。/save や テンプレート適用など、config.py
@@ -861,6 +988,128 @@ def render_motor_calibration_widget() -> str:
     </div>'''
 
 
+def render_planner_test_widget() -> str:
+    """「判断」カテゴリの先頭に差し込む、判断ロジック(planner.py)のライブテストウィジェット。
+    実機・カメラ・AIモデルを使わずにconfig.pyの値だけで完結する4関数
+    (right_left_3 / right_left_3_records / wall_follow / wall_follow_pid)だけを対象とする。
+    このウィジェットはconfig.pyに何も書き込まない(あくまでロジックの動作確認用)。"""
+    status_html = (
+        '<span class="hw-badge hw-on">🟢 planner.py 読み込み済み</span>'
+        if PLANNER_AVAILABLE else
+        f'<span class="hw-badge hw-off" title="{_html_escape(PLANNER_IMPORT_ERROR)}">⚪ 利用不可(torch等の依存ライブラリが必要)</span>'
+    )
+    func_options = "".join(
+        f'<option value="{key}">{spec["label"]}</option>' for key, spec in PLANNER_FUNCTIONS.items()
+    )
+    functions_json = json.dumps(
+        {key: dict(label=spec["label"], args=spec["args"], needs_side=spec["needs_side"])
+         for key, spec in PLANNER_FUNCTIONS.items()},
+        ensure_ascii=False,
+    )
+    return f'''
+    <div class="motor-widget">
+      <div class="motor-widget-head">
+        <h3>🧭 判断ロジック ライブテスト</h3>
+        {status_html}
+      </div>
+      <p class="field-help">
+        センサー距離(mm)を入力すると、実際のplanner.pyのロジックでsteering/throttleがどう計算されるか確認できます。
+        config.pyには一切書き込みません。画面上でまだ保存していないK_P等の値も、テスト時にはそのまま使われます。
+      </p>
+
+      <div class="raw-row">
+        <select id="planner-func-select" onchange="plannerUpdateInputs()">{func_options}</select>
+      </div>
+      <div class="raw-row" id="planner-side-row">
+        <select id="planner-side-select">
+          <option value="right">右手法(右の壁沿い)</option>
+          <option value="left">左手法(左の壁沿い)</option>
+        </select>
+      </div>
+      <div id="planner-arg-inputs"></div>
+      <div class="lock-buttons">
+        <button type="button" onclick="plannerTest()">この入力でテスト</button>
+        <button type="button" onclick="plannerReset()">状態をリセット</button>
+      </div>
+      <div id="planner-result" class="planner-result" hidden></div>
+    </div>
+    <script>
+      const PLANNER_FUNCTIONS = {functions_json};
+      const PLANNER_AVAILABLE_JS = {"true" if PLANNER_AVAILABLE else "false"};
+      const PLANNER_OVERRIDE_KEYS = ['K_P','K_I','K_D','TARGET_RANGE','TARGET_RANGE_ADJUSTMENT',
+        'DETECTION_RANGE','RIGHT_LEFT_RANGE','FORWARD_STRAIGHT','FORWARD_CORNER'];
+
+      function plannerUpdateInputs() {{
+        const key = document.getElementById('planner-func-select').value;
+        const spec = PLANNER_FUNCTIONS[key];
+        // .raw-row の display:flex が [hidden] のデフォルトスタイルより優先されてしまうため、
+        // hidden属性ではなくinline styleで直接出し分ける
+        document.getElementById('planner-side-row').style.display = spec.needs_side ? 'flex' : 'none';
+        const box = document.getElementById('planner-arg-inputs');
+        box.innerHTML = spec.args.map(a => `
+          <div class="raw-row">
+            <label style="flex:1;font-size:0.85rem;">${{a}} (mm)</label>
+            <input type="number" class="planner-arg-input" data-arg="${{a}}" placeholder="例: 300" style="flex:1;">
+          </div>`).join('');
+      }}
+
+      function plannerCollectOverrides() {{
+        const overrides = {{}};
+        for (const k of PLANNER_OVERRIDE_KEYS) {{
+          const el = document.querySelector(`[name="${{k}}"]`);
+          if (el) overrides[k] = el.value;
+        }}
+        return overrides;
+      }}
+
+      async function plannerTest() {{
+        if (!PLANNER_AVAILABLE_JS) {{ showToast('planner.pyが読み込まれていません', true); return; }}
+        const func = document.getElementById('planner-func-select').value;
+        const spec = PLANNER_FUNCTIONS[func];
+        const side = document.getElementById('planner-side-select').value;
+        const distances = {{}};
+        document.querySelectorAll('.planner-arg-input').forEach(el => {{ distances[el.dataset.arg] = el.value; }});
+        try {{
+          const res = await fetch('/planner/test', {{
+            method: 'POST', headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{func, side: spec.needs_side ? side : null, distances, overrides: plannerCollectOverrides()}}),
+          }});
+          const data = await res.json();
+          const box = document.getElementById('planner-result');
+          box.hidden = false;
+          if (!data.ok) {{
+            box.innerHTML = `<p class="field-error">${{escapeHtml(data.message || 'テストに失敗しました')}}</p>`;
+            return;
+          }}
+          let html = `<table class="summary">
+            <tr><th>steering</th><th>throttle</th></tr>
+            <tr><td>${{data.steering.toFixed(3)}}</td><td>${{data.throttle.toFixed(3)}}</td></tr>
+          </table>`;
+          if (data.pid_terms) {{
+            html += `<table class="summary">
+              <tr><th>P</th><th>I</th><th>D</th></tr>
+              <tr><td>${{data.pid_terms.P.toFixed(3)}}</td><td>${{data.pid_terms.I.toFixed(3)}}</td><td>${{data.pid_terms.D.toFixed(3)}}</td></tr>
+            </table>`;
+          }}
+          box.innerHTML = html;
+        }} catch (e) {{
+          showToast('通信エラー: ' + e, true);
+        }}
+      }}
+
+      async function plannerReset() {{
+        try {{
+          await fetch('/planner/reset', {{method: 'POST'}});
+          showToast('判断ロジックの内部状態をリセットしました', false);
+        }} catch (e) {{
+          showToast('通信エラー: ' + e, true);
+        }}
+      }}
+
+      plannerUpdateInputs();
+    </script>'''
+
+
 def render_advanced_sections(sections: list[dict]) -> str:
     if not sections:
         return ""
@@ -959,6 +1208,8 @@ def render_page() -> str:
         )
         if cat["id"] == "control":
             fields_html = render_motor_calibration_widget() + fields_html
+        if cat["id"] == "decision":
+            fields_html = render_planner_test_widget() + fields_html
         advanced_html = render_advanced_sections(advanced.get(cat["id"], []))
 
         panels += f'''
@@ -1182,6 +1433,8 @@ HTML_SHELL = f'''<!doctype html>
     background: var(--orange); color: #fff; border: none; padding: 0.6rem 1.2rem; border-radius: 999px;
     font-size: 0.85rem; font-weight: 700; cursor: pointer;
   }}
+  .planner-result {{ margin-top: 0.8rem; }}
+  .planner-result table.summary {{ margin-bottom: 0.6rem; }}
 
   /* センサー配置図 */
   .car-diagram-wrap {{ display: flex; justify-content: center; padding: 0.4rem 0 0.2rem; }}
@@ -1858,6 +2111,17 @@ class Handler(BaseHTTPRequestHandler):
                 motor_instance.set_throttle_pwm_value(0)
                 self._send_json(200, dict(ok=True))
 
+            elif self.path == "/planner/test":
+                result = run_planner_function(
+                    posted.get("func"), posted.get("side"),
+                    posted.get("distances", {}), posted.get("overrides", {}),
+                )
+                self._send_json(200, dict(ok=True, **result))
+
+            elif self.path == "/planner/reset":
+                reset_planner()
+                self._send_json(200, dict(ok=True))
+
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -1886,6 +2150,7 @@ def main():
     TEMPLATES_DIR.mkdir(exist_ok=True)
     get_snapshot(force=True)  # 起動時にキャッシュを作成しておく
     init_motor()
+    init_planner()
 
     with ThreadingHTTPServer(("0.0.0.0", PORT), Handler) as httpd:
         print("=" * 60)
@@ -1893,6 +2158,7 @@ def main():
         print(f"  対象ファイル: {CONFIG_PATH}")
         print(f"  キャッシュ:    作成完了")
         print(f"  モーター:      {'実機接続' if HARDWARE_AVAILABLE else 'モック(シミュレーション)'}")
+        print(f"  判断ロジック:  {'利用可能' if PLANNER_AVAILABLE else '利用不可(依存ライブラリ不足)'}")
         print(f"  テンプレート: {TEMPLATES_DIR}")
         print(f"  ローカル:      http://localhost:{PORT}")
         print(f"  同一ネットワーク: http://{local_ip()}:{PORT}")
