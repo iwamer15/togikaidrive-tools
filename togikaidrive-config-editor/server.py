@@ -27,6 +27,7 @@ import json
 import re
 import shutil
 import socket
+import sys
 import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -544,6 +545,62 @@ def _make_backup() -> Path:
 
 
 # ---------------------------------------------------------------------------
+# モーター初期化(実機があればMotor、無ければモック)
+# 「操作」カテゴリのモーター校正ウィジェットで使う。motor.py自体は一切変更せず、
+# 公開インターフェース(set_steering_pwm_value/set_throttle_pwm_value/pwm.set_pwm/
+# CHANNEL_STEERING/CHANNEL_THROTTLE/cleanup)を外から使うだけ。Adafruit_PCA9685が
+# 無い環境(開発機など)では自動的にモック(ログ出力のみ)にフォールバックし、UIと
+# config.py書き込みのロジックだけは実機が無くても確認できるようにする。
+# ---------------------------------------------------------------------------
+TOGIKAIDRIVE_DEV_DIR = CONFIG_PATH.parent
+
+
+class MockPWM:
+    def set_pwm(self, channel, on, value):
+        print(f"[モック] set_pwm(channel={channel}, on={on}, value={value})")
+
+
+class MockMotor:
+    def __init__(self):
+        self.CHANNEL_STEERING = 0
+        self.CHANNEL_THROTTLE = 1
+        self.pwm = MockPWM()
+
+    def set_steering_pwm_value(self, v):
+        print(f"[モック] set_steering_pwm_value({v})")
+
+    def set_throttle_pwm_value(self, v):
+        print(f"[モック] set_throttle_pwm_value({v})")
+
+    def limit_steering_pwm(self, v):
+        return v
+
+    def cleanup(self):
+        print("[モック] cleanup()")
+
+
+HARDWARE_AVAILABLE = False
+MOTOR_IMPORT_ERROR = ""
+motor_instance = None
+MOTOR_RAW_PWM_RANGE = (100, 600)
+
+
+def init_motor() -> None:
+    global HARDWARE_AVAILABLE, MOTOR_IMPORT_ERROR, motor_instance
+    try:
+        sys.path.insert(0, str(TOGIKAIDRIVE_DEV_DIR))
+        import motor as motor_module  # noqa: E402  (togikaidrive-dev/motor.py)
+        motor_instance = motor_module.Motor()
+        HARDWARE_AVAILABLE = True
+        print("実機のMotorを初期化しました(PCA9685接続済み)")
+    except Exception as e:  # noqa: BLE001  -- 開発機やライブラリ未導入時は握りつぶしてモックへ
+        MOTOR_IMPORT_ERROR = f"{type(e).__name__}: {e}"
+        motor_instance = MockMotor()
+        HARDWARE_AVAILABLE = False
+        print(f"実機のMotorを初期化できなかったため、モックモードで起動します({MOTOR_IMPORT_ERROR})")
+
+
+# ---------------------------------------------------------------------------
 # キャッシュ
 # 起動時にconfig.pyを読み込んでパース結果一式をキャッシュし、以降はハッシュが
 # 一致する限り再パースせずに使い回す。/save や テンプレート適用など、config.py
@@ -736,6 +793,70 @@ def render_field(field: dict, value, plan_groups, meta: dict) -> str:
     </div>'''
 
 
+def render_motor_calibration_widget() -> str:
+    """「操作」カテゴリの先頭に差し込むモーター校正ウィジェット。
+    ここで確定した値は既存の STEERING_CENTER_PWM 等の数値入力フィールドに直接
+    反映され(motorSetField→refreshCodePreview)、以降は他のフィールドと全く同じ
+    差分プレビュー・変更件数カウンター・「変更を保存」ボタンで扱われる
+    (このウィジェット専用の保存経路は持たない)。"""
+    status_html = (
+        '<span class="hw-badge hw-on">🟢 実機接続中</span>'
+        if HARDWARE_AVAILABLE else
+        f'<span class="hw-badge hw-off" title="{_html_escape(MOTOR_IMPORT_ERROR)}">⚪ モック(シミュレーション)モード</span>'
+    )
+    return f'''
+    <div class="motor-widget">
+      <div class="motor-widget-head">
+        <h3>🔧 モーター校正</h3>
+        {status_html}
+      </div>
+      <p class="field-help">
+        実際にサーボ・ESCを動かして校正できます。確定した値は下の数値フィールドに反映されますが、
+        <b>ページ下部の「変更を保存」を押すまではconfig.pyには書き込まれません。</b>
+      </p>
+      <div class="warning">
+        ⚠️ ジジっとノイズが鳴り続ける場合は壊れる兆候なので、すぐに値を戻してください。
+        ページを開いただけでは何も送信されません(スライダーやボタンを操作した時だけ実機に送信します)。
+      </div>
+
+      <div class="slider-row">
+        <label>ライブテスト・ステアリング <span id="motor-steering-val">0.00</span></label>
+        <input type="range" id="motor-steering-slider" min="-1" max="1" step="0.05" value="0" oninput="motorSendLive()">
+      </div>
+      <div class="slider-row">
+        <label>ライブテスト・スロットル <span id="motor-throttle-val">0.00</span></label>
+        <input type="range" id="motor-throttle-slider" min="-1" max="1" step="0.05" value="0" oninput="motorSendLive()">
+      </div>
+
+      <div class="motor-calib-block">
+        <h4>ステアリング校正</h4>
+        <div class="raw-row">
+          <input type="number" id="motor-steering-raw-input" placeholder="例: 430" min="100" max="600">
+          <button type="button" onclick="motorTestRaw('steering')">送信(テスト)</button>
+        </div>
+        <div class="lock-buttons">
+          <button type="button" onclick="motorLockSteeringCenter()">これを中央にする</button>
+          <button type="button" onclick="motorLockSteeringExtreme()">これを左右どちらかの最大にする</button>
+        </div>
+      </div>
+
+      <div class="motor-calib-block">
+        <h4>スロットル校正</h4>
+        <div class="raw-row">
+          <input type="number" id="motor-throttle-raw-input" placeholder="例: 380" min="100" max="600">
+          <button type="button" onclick="motorTestRaw('throttle')">送信(テスト)</button>
+        </div>
+        <div class="lock-buttons">
+          <button type="button" onclick="motorLockThrottle('STOPPED')">これを停止(ニュートラル)にする</button>
+          <button type="button" onclick="motorLockThrottle('FORWARD')">これを前進最大にする</button>
+          <button type="button" onclick="motorLockThrottle('REVERSE')">これを後退最大にする</button>
+        </div>
+      </div>
+
+      <button type="button" id="motor-stop-btn" onclick="motorStop()">■ 停止</button>
+    </div>'''
+
+
 def render_advanced_sections(sections: list[dict]) -> str:
     if not sections:
         return ""
@@ -832,6 +953,8 @@ def render_page() -> str:
             render_field(f, values.get(f["key"]), plan_groups, curated_meta)
             for f in CURATED_FIELDS if f["category"] == cat["id"]
         )
+        if cat["id"] == "control":
+            fields_html = render_motor_calibration_widget() + fields_html
         advanced_html = render_advanced_sections(advanced.get(cat["id"], []))
 
         panels += f'''
@@ -1020,6 +1143,41 @@ HTML_SHELL = f'''<!doctype html>
     padding-left: 0.8rem; margin-left: -0.8rem;
   }}
   tr.changed td {{ background: var(--orange-tint); }}
+
+  /* モーター校正ウィジェット */
+  .motor-widget {{
+    padding: 0.9rem 0 1.3rem; border-bottom: 1px solid #EEF0F5; margin-bottom: 0.2rem;
+  }}
+  .motor-widget-head {{ display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.4rem; }}
+  .motor-widget-head h3 {{ margin: 0; font-size: 0.98rem; }}
+  .hw-badge {{ display: inline-block; padding: 0.25rem 0.6rem; border-radius: 999px; font-size: 0.72rem; font-weight: 700; }}
+  .hw-on {{ background: #0F5132; color: #C7F0DA; }}
+  .hw-off {{ background: var(--card-bg); color: var(--muted); cursor: help; }}
+  .warning {{
+    background: var(--orange-tint); border-radius: 10px; padding: 0.7rem 0.9rem; font-size: 0.8rem;
+    color: var(--text-dark); line-height: 1.5; margin: 0.6rem 0 1rem;
+  }}
+  .slider-row {{ margin-bottom: 0.9rem; }}
+  .slider-row label {{ display: flex; justify-content: space-between; font-weight: 700; font-size: 0.85rem; margin-bottom: 0.25rem; }}
+  .slider-row input[type=range] {{ width: 100%; accent-color: var(--cyan); }}
+  .motor-calib-block {{ margin-bottom: 1rem; }}
+  .motor-calib-block h4 {{ margin: 0 0 0.5rem; font-size: 0.85rem; }}
+  .raw-row {{ display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.6rem; }}
+  .raw-row input[type=number] {{ flex: 1; }}
+  .raw-row button {{
+    background: var(--steel); color: #fff; border: none; padding: 0.55rem 0.9rem; border-radius: 8px;
+    font-size: 0.8rem; font-weight: 700; cursor: pointer; white-space: nowrap;
+  }}
+  .lock-buttons {{ display: flex; gap: 0.5rem; flex-wrap: wrap; }}
+  .lock-buttons button {{
+    flex: 1; background: var(--card-bg); border: 1px solid #D8DCE6; color: var(--text-dark);
+    padding: 0.5rem 0.65rem; border-radius: 8px; font-size: 0.76rem; font-weight: 700; cursor: pointer;
+  }}
+  .lock-buttons button:hover {{ background: #E9ECF3; }}
+  button#motor-stop-btn {{
+    background: var(--orange); color: #fff; border: none; padding: 0.6rem 1.2rem; border-radius: 999px;
+    font-size: 0.85rem; font-weight: 700; cursor: pointer;
+  }}
 
   /* センサー配置図 */
   .car-diagram-wrap {{ display: flex; justify-content: center; padding: 0.4rem 0 0.2rem; }}
@@ -1261,6 +1419,88 @@ function escapeHtml(s) {{
   const div = document.createElement('div');
   div.textContent = s;
   return div.innerHTML;
+}}
+
+// ---------------------------------------------------------------------
+// モーター校正ウィジェット
+// 確定ボタンは、値を直接 STEERING_CENTER_PWM 等の既存フィールドにセットして
+// refreshCodePreview() を呼ぶだけ。専用の保存経路は持たず、ページ共通の
+// 「変更を保存」フローにそのまま乗る。
+// ---------------------------------------------------------------------
+async function motorSendLive() {{
+  const steering = parseFloat(document.getElementById('motor-steering-slider').value);
+  const throttle = parseFloat(document.getElementById('motor-throttle-slider').value);
+  document.getElementById('motor-steering-val').textContent = steering.toFixed(2);
+  document.getElementById('motor-throttle-val').textContent = throttle.toFixed(2);
+  try {{
+    await fetch('/motor/live', {{
+      method: 'POST', headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{steering, throttle}}),
+    }});
+  }} catch (e) {{
+    showToast('通信エラー: ' + e, true);
+  }}
+}}
+
+async function motorStop() {{
+  document.getElementById('motor-steering-slider').value = 0;
+  document.getElementById('motor-throttle-slider').value = 0;
+  document.getElementById('motor-steering-val').textContent = '0.00';
+  document.getElementById('motor-throttle-val').textContent = '0.00';
+  try {{
+    await fetch('/motor/stop', {{method: 'POST'}});
+    showToast('停止しました', false);
+  }} catch (e) {{
+    showToast('通信エラー: ' + e, true);
+  }}
+}}
+
+async function motorTestRaw(axis) {{
+  const input = document.getElementById('motor-' + axis + '-raw-input');
+  const value = parseInt(input.value, 10);
+  if (!Number.isFinite(value)) {{ showToast('数値を入力してください', true); return; }}
+  try {{
+    const res = await fetch('/motor/raw', {{
+      method: 'POST', headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{axis, value}}),
+    }});
+    const data = await res.json();
+    if (!data.ok) showToast(data.message || '送信に失敗しました', true);
+  }} catch (e) {{
+    showToast('通信エラー: ' + e, true);
+  }}
+}}
+
+function motorSetField(key, value) {{
+  const el = document.querySelector(`[name="${{key}}"]`);
+  if (!el) return;
+  el.value = value;
+  refreshCodePreview(key);
+}}
+
+function motorLockSteeringCenter() {{
+  const v = parseInt(document.getElementById('motor-steering-raw-input').value, 10);
+  if (!Number.isFinite(v)) {{ showToast('先に値を送信してテストしてください', true); return; }}
+  motorSetField('STEERING_CENTER_PWM', v);
+  showToast('ステアリング中央を ' + v + ' に設定しました(まだ保存されていません)', false);
+}}
+
+function motorLockSteeringExtreme() {{
+  const v = parseInt(document.getElementById('motor-steering-raw-input').value, 10);
+  if (!Number.isFinite(v)) {{ showToast('先に値を送信してテストしてください', true); return; }}
+  const centerEl = document.querySelector('[name="STEERING_CENTER_PWM"]');
+  const center = centerEl ? parseInt(centerEl.value, 10) : NaN;
+  if (!Number.isFinite(center)) {{ showToast('先に中央を設定してください', true); return; }}
+  const width = Math.abs(v - center);
+  motorSetField('STEERING_WIDTH_PWM', width);
+  showToast('振れ幅を ' + width + ' に設定しました(まだ保存されていません)', false);
+}}
+
+function motorLockThrottle(kind) {{
+  const v = parseInt(document.getElementById('motor-throttle-raw-input').value, 10);
+  if (!Number.isFinite(v)) {{ showToast('先に値を送信してテストしてください', true); return; }}
+  motorSetField('THROTTLE_' + kind + '_PWM', v);
+  showToast('設定しました: ' + v + '(まだ保存されていません)', false);
 }}
 
 // ---------------------------------------------------------------------
@@ -1581,6 +1821,33 @@ class Handler(BaseHTTPRequestHandler):
                 delete_template(posted.get("name", ""))
                 self._send_json(200, dict(ok=True))
 
+            elif self.path == "/motor/live":
+                steering = max(-1.0, min(1.0, float(posted.get("steering", 0))))
+                throttle = max(-1.0, min(1.0, float(posted.get("throttle", 0))))
+                motor_instance.set_steering_pwm_value(steering)
+                motor_instance.set_throttle_pwm_value(throttle)
+                self._send_json(200, dict(ok=True))
+
+            elif self.path == "/motor/raw":
+                axis = posted.get("axis")
+                value = int(posted.get("value"))
+                lo, hi = MOTOR_RAW_PWM_RANGE
+                if not (lo <= value <= hi):
+                    raise ValueError(f"PWM値は{lo}〜{hi}の範囲にしてください")
+                if axis == "steering":
+                    channel = motor_instance.CHANNEL_STEERING
+                elif axis == "throttle":
+                    channel = motor_instance.CHANNEL_THROTTLE
+                else:
+                    raise ValueError(f"不明な軸: {axis}")
+                motor_instance.pwm.set_pwm(channel, 0, value)
+                self._send_json(200, dict(ok=True))
+
+            elif self.path == "/motor/stop":
+                motor_instance.set_steering_pwm_value(0)
+                motor_instance.set_throttle_pwm_value(0)
+                self._send_json(200, dict(ok=True))
+
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -1608,12 +1875,14 @@ def main():
 
     TEMPLATES_DIR.mkdir(exist_ok=True)
     get_snapshot(force=True)  # 起動時にキャッシュを作成しておく
+    init_motor()
 
     with ThreadingHTTPServer(("0.0.0.0", PORT), Handler) as httpd:
         print("=" * 60)
         print("togikaidrive 設定エディタ を起動しました")
         print(f"  対象ファイル: {CONFIG_PATH}")
         print(f"  キャッシュ:    作成完了")
+        print(f"  モーター:      {'実機接続' if HARDWARE_AVAILABLE else 'モック(シミュレーション)'}")
         print(f"  テンプレート: {TEMPLATES_DIR}")
         print(f"  ローカル:      http://localhost:{PORT}")
         print(f"  同一ネットワーク: http://{local_ip()}:{PORT}")
@@ -1623,6 +1892,11 @@ def main():
             httpd.serve_forever()
         except KeyboardInterrupt:
             print("\n終了しました")
+        finally:
+            try:
+                motor_instance.cleanup()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 if __name__ == "__main__":
