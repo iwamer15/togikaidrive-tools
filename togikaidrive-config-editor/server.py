@@ -123,6 +123,38 @@ CURATED_FIELDS = [
     dict(key="MODEL_NAME", category="decision", kind="str", label="使用するモデルファイル名 (MODEL_NAME)",
          help="自動走行時に読み込む学習済みモデルのファイル名。"),
 
+    # ------------------------- 画像認識(YOLO物体検知) -------------------------
+    dict(key="USE_YOLO_DETECTION", category="decision", kind="bool", label="YOLO物体検知を使う (USE_YOLO_DETECTION)",
+         help="カメラ画像をYOLOで解析し、検知した物体(標識・障害物など)に応じて減速・回避・モデル切り替えを行う。"),
+    dict(key="YOLO_MODEL_PATH", category="decision", kind="str", label="YOLOモデルファイル (YOLO_MODEL_PATH)",
+         help="検知に使うYOLOモデルの重みファイルパス(togikaidrive-dev基準の相対パス)。下のお試しウィジェットもこの値を使う。"),
+    dict(key="YOLO_CONFIDENCE_THRESHOLD", category="decision", kind="float", min=0, max=1, step=0.05,
+         label="検知信頼度閾値 (YOLO_CONFIDENCE_THRESHOLD)", help="この信頼度以上の検知だけを採用する。低いほど誤検知が増え、高いほど見逃しが増える。"),
+    dict(key="YOLO_IOU_THRESHOLD", category="decision", kind="float", min=0, max=1, step=0.05,
+         label="NMSのIoU閾値 (YOLO_IOU_THRESHOLD)", help="重複する検知枠を1つにまとめる際の重なり判定の閾値。"),
+    dict(key="YOLO_INPUT_SIZE", category="decision", kind="int", min=32, max=1920,
+         label="YOLO入力画像サイズ (YOLO_INPUT_SIZE)", help="YOLOに入力する画像の一辺のピクセル数。大きいほど高精度・低速。"),
+    dict(key="YOLO_DETECTION_INTERVAL", category="decision", kind="int", min=1, max=30,
+         label="検知実行間隔 (YOLO_DETECTION_INTERVAL, フレーム)", help="毎フレーム検知すると重いため、何フレームに1回検知するか。"),
+    dict(key="YOLO_DISPLAY_DETECTIONS", category="decision", kind="bool", label="検知結果をターミナル表示 (YOLO_DISPLAY_DETECTIONS)",
+         help="走行中、検知したクラス名・信頼度をターミナルに表示するか。"),
+    dict(key="YOLO_SAVE_ANNOTATED_IMAGES", category="decision", kind="bool", label="検知結果画像を保存 (YOLO_SAVE_ANNOTATED_IMAGES)",
+         help="検知枠を描き込んだ画像をファイルに保存するか(デバッグ用。走行の負荷が上がる)。"),
+    dict(key="USE_YOLO_OBJECT_TRACKING", category="decision", kind="bool", label="YOLO物体追従を使う (USE_YOLO_OBJECT_TRACKING)",
+         help="検知した特定クラスの物体(先行車など)の中心へステアリングを補正しながら追従する。"),
+    dict(key="YOLO_TRACKING_STEERING_GAIN", category="decision", kind="float", min=0, max=2, step=0.05,
+         label="追従ステアリングゲイン (YOLO_TRACKING_STEERING_GAIN)", help="対象が画像中心からどれだけずれているかに対する補正の強さ。"),
+    dict(key="YOLO_TRACKING_CENTER_DEADZONE", category="decision", kind="float", min=0, max=1, step=0.01,
+         label="追従の中心不感帯 (YOLO_TRACKING_CENTER_DEADZONE)", help="画像幅比。この範囲内のズレは補正しない(小刻みな揺れ防止)。"),
+    dict(key="USE_YOLO_OBSTACLE_AVOIDANCE", category="decision", kind="bool", label="YOLO障害物回避を使う (USE_YOLO_OBSTACLE_AVOIDANCE)",
+         help="検知した特定クラスの物体が中央エリアに大きく映ったとき、逆方向へステアリングを補正して回避する。"),
+    dict(key="YOLO_OBSTACLE_AVOIDANCE_GAIN", category="decision", kind="float", min=0, max=3, step=0.05,
+         label="回避ステアリングゲイン (YOLO_OBSTACLE_AVOIDANCE_GAIN)", help="回避時のステアリング補正の強さ。"),
+    dict(key="YOLO_OBSTACLE_SIZE_THRESHOLD", category="decision", kind="float", min=0, max=1, step=0.01,
+         label="回避判定サイズ閾値 (YOLO_OBSTACLE_SIZE_THRESHOLD)", help="画像面積比。これより小さい(=遠い)検知は回避対象にしない。"),
+    dict(key="YOLO_OBSTACLE_CENTER_ZONE", category="decision", kind="float", min=0, max=1, step=0.01,
+         label="回避を判定する中央エリア幅 (YOLO_OBSTACLE_CENTER_ZONE)", help="画像幅比。このエリア内に映った対象だけを回避対象とする。"),
+
     # ============================== 操作 ==============================
     dict(key="FORWARD_STRAIGHT", category="control", kind="float", min=-1, max=1, step=0.05,
          label="直線速度 (FORWARD_STRAIGHT)", help="まっすぐ進む速さ。0〜1の範囲が目安。"),
@@ -733,6 +765,125 @@ def run_planner_function(func_name: str, side: str | None, distances: dict, over
 
 
 # ---------------------------------------------------------------------------
+# YOLO物体検知(yolo_detection.py)のお試しウィジェット
+# 「判断」カテゴリの末尾で使う。アップロードした1枚の画像に対して、実際の
+# model_inference.load_model_with_engine() / ultralyticsモデルで検知を実行し、
+# 検知枠をブラウザ上に重ねて表示する。config.pyのUSE_YOLO_DETECTIONの値に関わらず
+# (無効でも)試せるようにする(パラメータ調整中はまだ無効にしていることが多いため)。
+# planner.py同様、torch/ultralyticsが無い開発機ではモックを作らずウィジェットを
+# 無効表示にするだけに留める。config.pyへの書き込みは一切行わない。
+# ---------------------------------------------------------------------------
+YOLO_AVAILABLE = False
+YOLO_IMPORT_ERROR = ""
+model_inference_ref = None
+_yolo_model_cache: dict = {"key": None, "model": None}
+
+
+def init_yolo() -> None:
+    global YOLO_AVAILABLE, YOLO_IMPORT_ERROR, model_inference_ref, config_module_ref
+    try:
+        sys.path.insert(0, str(TOGIKAIDRIVE_DEV_DIR))
+        import model_inference as model_inference_module  # noqa: E402  (togikaidrive-dev/model_inference.py)
+        if config_module_ref is None:
+            import config as _config_module  # noqa: E402
+            config_module_ref = _config_module
+        model_inference_ref = model_inference_module
+        YOLO_AVAILABLE = True
+        print("model_inference.pyを読み込みました(YOLO検知お試しウィジェットが利用可能)")
+    except Exception as e:  # noqa: BLE001  -- torch/ultralytics等の依存が無い開発機では失敗しうる
+        YOLO_IMPORT_ERROR = f"{type(e).__name__}: {e}"
+        model_inference_ref = None
+        YOLO_AVAILABLE = False
+        print(f"model_inference.pyを読み込めなかったため、YOLO検知お試しウィジェットは無効です({YOLO_IMPORT_ERROR})")
+
+
+def _resolve_yolo_model_path(raw_path: str) -> Path:
+    p = Path(raw_path or "")
+    if not raw_path:
+        raise ValueError("YOLOモデルファイルのパスを入力してください")
+    if not p.is_absolute():
+        p = TOGIKAIDRIVE_DEV_DIR / p
+    if not p.is_file():
+        raise ValueError(f"モデルファイルが見つかりません: {raw_path}")
+    return p
+
+
+def _get_yolo_model(model_path: Path, inference_engine: str):
+    key = (str(model_path), inference_engine)
+    if _yolo_model_cache["key"] != key:
+        model = model_inference_ref.load_model_with_engine(
+            str(model_path), model_type="yolo", inference_engine=inference_engine,
+        )
+        if model is None:
+            raise ValueError("モデルの読み込みに失敗しました(ターミナルのログを確認してください)")
+        _yolo_model_cache["key"] = key
+        _yolo_model_cache["model"] = model
+    return _yolo_model_cache["model"]
+
+
+def run_yolo_test(image_b64: str, overrides: dict) -> dict:
+    if not YOLO_AVAILABLE:
+        raise ValueError("model_inference.pyが読み込まれていないため、テストできません(torch/ultralyticsが必要)")
+    if not image_b64:
+        raise ValueError("画像をアップロードしてください")
+    try:
+        import numpy as np
+        from PIL import Image
+        import io
+    except ImportError as e:
+        raise ValueError(f"画像処理に numpy / Pillow が必要です: {e}")
+
+    try:
+        # "data:image/png;base64,...." 形式でも先頭のヘッダー部分だけ来た場合でも動くようにする
+        raw_b64 = image_b64.split(",", 1)[-1]
+        image_bytes = base64.b64decode(raw_b64)
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Exception as e:
+        raise ValueError(f"画像を読み込めませんでした: {e}")
+
+    image_np = np.array(img)
+    img_h, img_w = image_np.shape[:2]
+
+    model_path = _resolve_yolo_model_path(overrides.get("model_path", ""))
+    inference_engine = overrides.get("inference_engine") or getattr(config_module_ref, "INFERENCE_ENGINE", "pytorch")
+    model = _get_yolo_model(model_path, inference_engine)
+
+    try:
+        conf = float(overrides.get("confidence", 0.5))
+        iou = float(overrides.get("iou", 0.45))
+        imgsz = int(overrides.get("input_size", 640))
+    except (TypeError, ValueError):
+        raise ValueError("信頼度閾値・IoU閾値・入力サイズは数値で入力してください")
+
+    class_names_override = getattr(config_module_ref, "YOLO_CLASS_NAMES", {}) or {}
+    model_names = getattr(model, "names", {}) or {}
+
+    try:
+        results = model.predict(image_np, conf=conf, iou=iou, imgsz=imgsz, classes=None, verbose=False)
+    except Exception as e:
+        raise ValueError(f"YOLO推論に失敗しました: {e}")
+
+    detections = []
+    if results and len(results) > 0:
+        result = results[0]
+        if result.boxes is not None:
+            for box in result.boxes:
+                class_id = int(box.cls[0])
+                confidence = float(box.conf[0])
+                x1, y1, x2, y2 = [float(v) for v in box.xyxy[0].tolist()]
+                class_name = class_names_override.get(class_id) or model_names.get(class_id, f"class_{class_id}")
+                detections.append(dict(
+                    class_id=class_id, class_name=class_name, confidence=confidence,
+                    x1=x1, y1=y1, x2=x2, y2=y2,
+                ))
+    detections.sort(key=lambda d: d["confidence"], reverse=True)
+
+    # アップロード画像自体はブラウザ側が既に表示用に持っているため、サーバーからは
+    # 検知結果(枠座標・クラス名・信頼度)と元画像サイズだけを返す。
+    return dict(width=img_w, height=img_h, detections=detections, model_file=model_path.name)
+
+
+# ---------------------------------------------------------------------------
 # キャッシュ
 # 起動時にconfig.pyを読み込んでパース結果一式をキャッシュし、以降はハッシュが
 # 一致する限り再パースせずに使い回す。/save や テンプレート適用など、config.py
@@ -1197,6 +1348,120 @@ def render_training_results_widget() -> str:
     </script>'''
 
 
+def render_yolo_test_widget() -> str:
+    """「判断」カテゴリの末尾に差し込む、YOLO物体検知(yolo_detection.py)のお試しウィジェット。
+    1枚の画像をアップロードすると、実際のYOLOモデルで検知を実行し、検知枠を画像上に重ねて表示する。
+    実機カメラ・実走行なしで「今のYOLO_MODEL_PATH・信頼度閾値・IoU閾値・入力サイズ(いずれも
+    画面上でまだ保存していない値も含む)で、狙った物体がちゃんと検知されるか」を確認できる。
+    config.pyには一切書き込まない(専用の保存経路を持たない)。"""
+    status_html = (
+        '<span class="hw-badge hw-on">🟢 model_inference.py 読み込み済み</span>'
+        if YOLO_AVAILABLE else
+        f'<span class="hw-badge hw-off" title="{_html_escape(YOLO_IMPORT_ERROR)}">⚪ 利用不可(torch/ultralytics等の依存ライブラリが必要)</span>'
+    )
+    disabled_attr = "" if YOLO_AVAILABLE else "disabled"
+    return f'''
+    <div class="motor-widget">
+      <div class="motor-widget-head">
+        <h3>🎯 YOLO物体検知 お試し</h3>
+        {status_html}
+      </div>
+      <p class="field-help">
+        画像を1枚アップロードすると、上の YOLO_MODEL_PATH・検知信頼度閾値・NMSのIoU閾値・YOLO入力画像サイズ
+        (画面上でまだ保存していない値も含む)でそのまま検知を実行し、検知枠を重ねて表示します。
+        対象クラス絞り込み(YOLO_TARGET_CLASSES)は無視して常に全クラスを表示します(検知精度そのものの確認用のため)。
+        config.pyには一切書き込みません。
+      </p>
+      <div class="raw-row">
+        <input type="file" id="yolo-file-input" accept="image/*" {disabled_attr} onchange="yoloOnFileSelected(event)">
+        <button type="button" onclick="yoloRunTest()" {disabled_attr}>この画像で検知を試す</button>
+      </div>
+      <div class="yolo-preview-wrap" id="yolo-preview-wrap" hidden>
+        <img id="yolo-preview-img" alt="アップロード画像">
+        <div id="yolo-boxes-overlay"></div>
+      </div>
+      <div id="yolo-result" class="planner-result" hidden></div>
+    </div>
+    <script>
+      let yoloImageDataUrl = null;
+
+      function yoloOnFileSelected(event) {{
+        const file = event.target.files && event.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {{
+          yoloImageDataUrl = reader.result;
+          const img = document.getElementById('yolo-preview-img');
+          img.src = yoloImageDataUrl;
+          document.getElementById('yolo-preview-wrap').hidden = false;
+          document.getElementById('yolo-boxes-overlay').innerHTML = '';
+          document.getElementById('yolo-result').hidden = true;
+        }};
+        reader.readAsDataURL(file);
+      }}
+
+      function yoloCollectOverrides() {{
+        const get = (name) => {{
+          const el = document.querySelector(`[name="${{name}}"]`);
+          return el ? el.value : undefined;
+        }};
+        return {{
+          model_path: get('YOLO_MODEL_PATH'),
+          confidence: get('YOLO_CONFIDENCE_THRESHOLD'),
+          iou: get('YOLO_IOU_THRESHOLD'),
+          input_size: get('YOLO_INPUT_SIZE'),
+        }};
+      }}
+
+      function yoloDrawBoxes(detections, naturalW, naturalH) {{
+        const img = document.getElementById('yolo-preview-img');
+        const overlay = document.getElementById('yolo-boxes-overlay');
+        const scaleX = img.clientWidth / naturalW;
+        const scaleY = img.clientHeight / naturalH;
+        overlay.innerHTML = detections.map(d => {{
+          const left = d.x1 * scaleX, top = d.y1 * scaleY;
+          const w = (d.x2 - d.x1) * scaleX, h = (d.y2 - d.y1) * scaleY;
+          const pct = (d.confidence * 100).toFixed(0);
+          return `<div class="yolo-box" style="left:${{left}}px;top:${{top}}px;width:${{w}}px;height:${{h}}px;">
+            <span class="yolo-box-label">${{escapeHtml(d.class_name)}} ${{pct}}%</span>
+          </div>`;
+        }}).join('');
+      }}
+
+      async function yoloRunTest() {{
+        if (!yoloImageDataUrl) {{ showToast('先に画像をアップロードしてください', true); return; }}
+        try {{
+          const res = await fetch('/yolo/test', {{
+            method: 'POST', headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{image_base64: yoloImageDataUrl, overrides: yoloCollectOverrides()}}),
+          }});
+          const data = await res.json();
+          const box = document.getElementById('yolo-result');
+          box.hidden = false;
+          if (!data.ok) {{
+            box.innerHTML = `<p class="field-error">${{escapeHtml(data.message || 'テストに失敗しました')}}</p>`;
+            document.getElementById('yolo-boxes-overlay').innerHTML = '';
+            return;
+          }}
+          const img = document.getElementById('yolo-preview-img');
+          const draw = () => yoloDrawBoxes(data.detections, data.width, data.height);
+          if (img.complete && img.naturalWidth) draw(); else img.onload = draw;
+          if (!data.detections.length) {{
+            box.innerHTML = '<p class="field-help">検知結果はありませんでした(閾値やモデルを見直してみてください)。</p>';
+          }} else {{
+            const rows = data.detections.map(d =>
+              `<tr><td>${{escapeHtml(d.class_name)}}</td><td>${{(d.confidence * 100).toFixed(1)}}%</td></tr>`
+            ).join('');
+            box.innerHTML = `<p class="field-help">モデル: ${{escapeHtml(data.model_file)}} ・ ${{data.detections.length}}件検知</p>
+              <table class="summary"><tr><th>クラス</th><th>信頼度</th></tr>${{rows}}</table>`;
+          }}
+        }} catch (e) {{
+          showToast('通信エラー: ' + e, true);
+        }}
+      }}
+    </script>'''
+
+
 def render_advanced_sections(sections: list[dict]) -> str:
     if not sections:
         return ""
@@ -1296,7 +1561,8 @@ def render_page() -> str:
         if cat["id"] == "control":
             fields_html = render_motor_calibration_widget() + fields_html
         if cat["id"] == "decision":
-            fields_html = render_planner_test_widget() + fields_html + render_training_results_widget()
+            fields_html = (render_planner_test_widget() + fields_html
+                           + render_training_results_widget() + render_yolo_test_widget())
         advanced_html = render_advanced_sections(advanced.get(cat["id"], []))
 
         panels += f'''
@@ -1531,6 +1797,16 @@ HTML_SHELL = f'''<!doctype html>
     font-size: 0.78rem; font-weight: 700; cursor: pointer; white-space: nowrap;
   }}
   .model-loss-img {{ display: block; max-width: 100%; border-radius: 8px; margin-top: 0.6rem; }}
+
+  /* YOLO検知お試しウィジェット */
+  .yolo-preview-wrap {{ position: relative; display: inline-block; max-width: 100%; margin-top: 0.6rem; }}
+  #yolo-preview-img {{ display: block; max-width: 100%; border-radius: 8px; }}
+  #yolo-boxes-overlay {{ position: absolute; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; }}
+  .yolo-box {{ position: absolute; border: 2px solid var(--orange); border-radius: 2px; }}
+  .yolo-box-label {{
+    position: absolute; top: -1.4em; left: -2px; background: var(--orange); color: #fff;
+    font-size: 0.68rem; font-weight: 700; padding: 0.05rem 0.35rem; border-radius: 4px; white-space: nowrap;
+  }}
 
   /* センサー配置図 */
   .car-diagram-wrap {{ display: flex; justify-content: center; padding: 0.4rem 0 0.2rem; }}
@@ -2218,6 +2494,10 @@ class Handler(BaseHTTPRequestHandler):
                 reset_planner()
                 self._send_json(200, dict(ok=True))
 
+            elif self.path == "/yolo/test":
+                result = run_yolo_test(posted.get("image_base64", ""), posted.get("overrides", {}))
+                self._send_json(200, dict(ok=True, **result))
+
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -2247,6 +2527,7 @@ def main():
     get_snapshot(force=True)  # 起動時にキャッシュを作成しておく
     init_motor()
     init_planner()
+    init_yolo()
 
     with ThreadingHTTPServer(("0.0.0.0", PORT), Handler) as httpd:
         print("=" * 60)
@@ -2255,6 +2536,7 @@ def main():
         print(f"  キャッシュ:    作成完了")
         print(f"  モーター:      {'実機接続' if HARDWARE_AVAILABLE else 'モック(シミュレーション)'}")
         print(f"  判断ロジック:  {'利用可能' if PLANNER_AVAILABLE else '利用不可(依存ライブラリ不足)'}")
+        print(f"  YOLO検知:      {'利用可能' if YOLO_AVAILABLE else '利用不可(依存ライブラリ不足)'}")
         print(f"  テンプレート: {TEMPLATES_DIR}")
         print(f"  ローカル:      http://localhost:{PORT}")
         print(f"  同一ネットワーク: http://{local_ip()}:{PORT}")
