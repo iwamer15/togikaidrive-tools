@@ -22,13 +22,16 @@ from __future__ import annotations
 
 import ast
 import base64
+import difflib
 import hashlib
 import html
 import importlib
 import json
 import re
+import shlex
 import shutil
 import socket
+import subprocess
 import sys
 import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -884,6 +887,139 @@ def run_yolo_test(image_b64: str, overrides: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# ラズパイ(SSH)連携
+# 「🔌 ラズパイ連携」タブで使う。ラズパイ上のconfig.pyとの差分確認・相互反映を
+# ブラウザから行えるようにする。追加のpipライブラリを増やさない方針を維持するため、
+# paramiko等は使わずシステムのssh(OpenSSHクライアント。macOS/ラズパイOS双方に標準
+# 搭載)をsubprocessで呼び出すだけにする。実行するリモートコマンドはすべて
+# このファイル内で固定で組み立てたもの(cat/cp)のみで、外部からの自由なコマンド
+# 入力は受け付けない。
+# 接続情報(ホスト名・ユーザー名・鍵ファイルパス・リモートconfig.pyのパス)は、
+# このツール専用のローカルJSON(ssh_connection.json、.gitignore済み)に保存する。
+# パスワード認証はサポートしない(BatchMode=yesを常に付け、鍵認証が使えない場合は
+# パスワード入力待ちで固まらず即座にエラーになるようにする)。
+# ---------------------------------------------------------------------------
+SSH_CONNECTION_PATH = Path(__file__).resolve().parent / "ssh_connection.json"
+_DEFAULT_SSH_CONNECTION = dict(host="", user="pi", port=22, identity_file="", remote_config_path="")
+
+
+def load_ssh_connection() -> dict:
+    if not SSH_CONNECTION_PATH.is_file():
+        return dict(_DEFAULT_SSH_CONNECTION)
+    try:
+        data = json.loads(SSH_CONNECTION_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001  -- 壊れたJSONの場合はデフォルトに戻す
+        return dict(_DEFAULT_SSH_CONNECTION)
+    conn = dict(_DEFAULT_SSH_CONNECTION)
+    conn.update({k: data[k] for k in _DEFAULT_SSH_CONNECTION if k in data})
+    return conn
+
+
+def save_ssh_connection(data: dict) -> dict:
+    conn = dict(_DEFAULT_SSH_CONNECTION)
+    conn["host"] = str(data.get("host", "")).strip()
+    conn["user"] = str(data.get("user", "pi")).strip() or "pi"
+    try:
+        conn["port"] = int(data.get("port") or 22)
+    except (TypeError, ValueError):
+        raise ValueError("ポート番号は整数で入力してください")
+    conn["identity_file"] = str(data.get("identity_file", "")).strip()
+    conn["remote_config_path"] = str(data.get("remote_config_path", "")).strip()
+    if not conn["host"]:
+        raise ValueError("ホスト名(またはIPアドレス)を入力してください")
+    if not conn["remote_config_path"]:
+        raise ValueError("ラズパイ上のconfig.pyのパスを入力してください")
+    SSH_CONNECTION_PATH.write_text(json.dumps(conn, ensure_ascii=False, indent=2), encoding="utf-8")
+    return conn
+
+
+def _ssh_base_args(conn: dict) -> list:
+    if not conn.get("host"):
+        raise ValueError("先に接続設定(ホスト名)を保存してください")
+    ssh_bin = shutil.which("ssh")
+    if not ssh_bin:
+        raise ValueError("sshコマンドが見つかりません(OpenSSHクライアントが必要です)")
+    args = [ssh_bin, "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+            "-o", "StrictHostKeyChecking=accept-new", "-p", str(conn.get("port") or 22)]
+    if conn.get("identity_file"):
+        args += ["-i", conn["identity_file"]]
+    args.append(f"{conn.get('user') or 'pi'}@{conn['host']}")
+    return args
+
+
+def _run_ssh(conn: dict, remote_command: str, input_bytes: bytes | None = None, timeout: int = 15):
+    """remote_command はこのファイル内で固定で組み立てた文字列のみを渡すこと
+    (ユーザーの自由入力をそのまま渡さない)。"""
+    args = _ssh_base_args(conn) + [remote_command]
+    try:
+        proc = subprocess.run(args, input=input_bytes, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise ValueError("接続がタイムアウトしました(ホスト名・ポート・電源・鍵認証の設定を確認してください)")
+    except FileNotFoundError:
+        raise ValueError("sshコマンドの実行に失敗しました")
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def test_ssh_connection() -> dict:
+    conn = load_ssh_connection()
+    code, out, err = _run_ssh(conn, "echo OK && hostname && (python3 --version 2>&1)")
+    if code != 0:
+        raise ValueError(f"接続に失敗しました: {err.decode('utf-8', 'replace').strip() or '(詳細不明。SSH鍵認証が設定されているか確認してください)'}")
+    return dict(message=out.decode("utf-8", "replace").strip())
+
+
+def fetch_remote_config_text(conn: dict) -> str:
+    remote_path = conn.get("remote_config_path")
+    if not remote_path:
+        raise ValueError("ラズパイ上のconfig.pyのパスを設定してください")
+    code, out, err = _run_ssh(conn, f"cat {shlex.quote(remote_path)}")
+    if code != 0:
+        raise ValueError(f"リモートのconfig.pyを取得できませんでした: {err.decode('utf-8', 'replace').strip()}")
+    return out.decode("utf-8", "replace")
+
+
+def diff_local_remote() -> dict:
+    conn = load_ssh_connection()
+    remote_text = fetch_remote_config_text(conn)
+    local_text = CONFIG_PATH.read_text(encoding="utf-8")
+    diff_lines = list(difflib.unified_diff(
+        local_text.splitlines(), remote_text.splitlines(),
+        fromfile="ローカル(このMac)", tofile="ラズパイ", lineterm="",
+    ))
+    return dict(diff=diff_lines, identical=(local_text == remote_text))
+
+
+def push_local_config_to_remote() -> str:
+    """ローカルのconfig.py(保存済みの内容)をラズパイに書き込む。書き込み前に必ず
+    リモート側も config.py.bak.<日時> にバックアップしてから上書きする(ローカルの
+    /save と同じ安全方針)。scpに依存せず、`cat > path` にローカルのバイト列を
+    標準入力で流し込むことで1回のssh呼び出しだけで完結させる。"""
+    conn = load_ssh_connection()
+    remote_path = conn.get("remote_config_path")
+    if not remote_path:
+        raise ValueError("ラズパイ上のconfig.pyのパスを設定してください")
+    local_bytes = CONFIG_PATH.read_bytes()
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    quoted = shlex.quote(remote_path)
+    remote_cmd = f"test -f {quoted} && cp {quoted} {quoted}.bak.{ts}; cat > {quoted}"
+    code, _out, err = _run_ssh(conn, remote_cmd, input_bytes=local_bytes)
+    if code != 0:
+        raise ValueError(f"ラズパイへの反映に失敗しました: {err.decode('utf-8', 'replace').strip()}")
+    return f"{Path(remote_path).name}.bak.{ts}"
+
+
+def pull_remote_config_to_local() -> Path:
+    """ラズパイ上のconfig.pyの内容でローカルのconfig.pyを上書きする。書き込み前に
+    必ずローカルも(通常の保存と同じ)_make_backup()でバックアップする。"""
+    conn = load_ssh_connection()
+    remote_text = fetch_remote_config_text(conn)
+    backup_path = _make_backup()
+    CONFIG_PATH.write_text(remote_text, encoding="utf-8")
+    invalidate_cache()
+    return backup_path
+
+
+# ---------------------------------------------------------------------------
 # キャッシュ
 # 起動時にconfig.pyを読み込んでパース結果一式をキャッシュし、以降はハッシュが
 # 一致する限り再パースせずに使い回す。/save や テンプレート適用など、config.py
@@ -1462,6 +1598,159 @@ def render_yolo_test_widget() -> str:
     </script>'''
 
 
+def render_remote_widget() -> str:
+    """「🔌 ラズパイ連携」タブの中身。CURATED_FIELDSに項目を持たない独立タブなので、
+    他のカテゴリのようにフィールド一覧を組み立てず、この関数の出力がそのままタブの
+    内容になる。config.pyへの反映はローカル/リモートいずれも専用のバックアップを
+    作成してから上書きする(保存フローとは別経路。既存の「変更を保存」とは独立)。"""
+    conn = load_ssh_connection()
+    return f'''
+    <div class="motor-widget">
+      <div class="motor-widget-head">
+        <h3>🔌 接続設定</h3>
+        <span class="hw-badge hw-off" id="remote-status-badge">⚪ 未テスト</span>
+      </div>
+      <p class="field-help">
+        ラズパイのIPアドレス(または <code>raspberrypi.local</code> のようなホスト名)・ユーザー名・
+        ラズパイ上のconfig.pyの絶対パスを入力して保存してください。
+        <b>パスワード認証は非対応です</b>(事前に <code>ssh-copy-id user@host</code> 等でこのMacの公開鍵を
+        ラズパイに登録しておく必要があります)。秘密鍵パスは空欄なら<code>~/.ssh</code>の既定鍵を使います。
+      </p>
+      <div class="raw-row"><label style="flex:1;font-size:0.85rem;">ホスト名 / IP</label>
+        <input id="remote-host" type="text" placeholder="例: 192.168.1.23" style="flex:2;" value="{_html_escape(conn['host'])}"></div>
+      <div class="raw-row"><label style="flex:1;font-size:0.85rem;">ユーザー名</label>
+        <input id="remote-user" type="text" style="flex:2;" value="{_html_escape(conn['user'])}"></div>
+      <div class="raw-row"><label style="flex:1;font-size:0.85rem;">ポート</label>
+        <input id="remote-port" type="number" style="flex:2;" value="{conn['port']}"></div>
+      <div class="raw-row"><label style="flex:1;font-size:0.85rem;">SSH秘密鍵パス(任意)</label>
+        <input id="remote-identity" type="text" placeholder="例: ~/.ssh/id_ed25519" style="flex:2;" value="{_html_escape(conn['identity_file'])}"></div>
+      <div class="raw-row"><label style="flex:1;font-size:0.85rem;">ラズパイ上のconfig.pyパス</label>
+        <input id="remote-config-path" type="text" placeholder="例: /home/pi/togikaidrive-dev/config.py" style="flex:2;" value="{_html_escape(conn['remote_config_path'])}"></div>
+      <div class="lock-buttons">
+        <button type="button" onclick="remoteSaveConnection()">接続設定を保存</button>
+        <button type="button" onclick="remoteTestConnection()">接続テスト</button>
+      </div>
+    </div>
+
+    <div class="motor-widget">
+      <div class="motor-widget-head"><h3>🔄 設定の相互反映</h3></div>
+      <p class="field-help">
+        「差分を確認」で、ローカル(このMac)とラズパイのconfig.pyを比較できます。
+        書き換え前には必ず両側とも自動バックアップ(<code>config.py.bak.日時</code>)を作成してから上書きします。
+        <b>画面上でまだ「変更を保存」していないフィールドの編集内容は反映されません(先にページ下部の「変更を保存」を押してください)。</b>
+      </p>
+      <div class="lock-buttons">
+        <button type="button" onclick="remoteDiff()">差分を確認</button>
+        <button type="button" onclick="remotePush()">ローカル → ラズパイに反映</button>
+        <button type="button" onclick="remotePull()">ラズパイ → ローカルに反映</button>
+      </div>
+      <div id="remote-diff-result"></div>
+    </div>
+    <script>
+      function remoteCollectConnection() {{
+        return {{
+          host: document.getElementById('remote-host').value,
+          user: document.getElementById('remote-user').value,
+          port: document.getElementById('remote-port').value,
+          identity_file: document.getElementById('remote-identity').value,
+          remote_config_path: document.getElementById('remote-config-path').value,
+        }};
+      }}
+
+      async function remoteSaveConnection() {{
+        try {{
+          const res = await fetch('/remote/connection/save', {{
+            method: 'POST', headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify(remoteCollectConnection()),
+          }});
+          const data = await res.json();
+          if (!data.ok) {{ showToast(data.message || '保存に失敗しました', true); return; }}
+          showToast('接続設定を保存しました', false);
+        }} catch (e) {{
+          showToast('通信エラー: ' + e, true);
+        }}
+      }}
+
+      async function remoteTestConnection() {{
+        const badge = document.getElementById('remote-status-badge');
+        badge.className = 'hw-badge hw-off';
+        badge.textContent = '⚪ 確認中...';
+        try {{
+          const res = await fetch('/remote/test', {{method: 'POST'}});
+          const data = await res.json();
+          if (!data.ok) {{
+            badge.textContent = '⚪ 接続失敗';
+            badge.title = data.message || '';
+            showToast(data.message || '接続に失敗しました', true);
+            return;
+          }}
+          badge.className = 'hw-badge hw-on';
+          badge.textContent = '🟢 接続OK';
+          badge.title = data.message || '';
+          showToast('ラズパイに接続できました', false);
+        }} catch (e) {{
+          showToast('通信エラー: ' + e, true);
+        }}
+      }}
+
+      function remoteRenderDiff(lines) {{
+        return lines.map(line => {{
+          let cls = 'diff-context';
+          if (line.startsWith('+++') || line.startsWith('---')) cls = 'diff-file';
+          else if (line.startsWith('+')) cls = 'diff-add';
+          else if (line.startsWith('-')) cls = 'diff-remove';
+          else if (line.startsWith('@@')) cls = 'diff-hunk';
+          return `<span class="${{cls}}">${{escapeHtml(line)}}</span>`;
+        }}).join('\\n');
+      }}
+
+      async function remoteDiff() {{
+        const box = document.getElementById('remote-diff-result');
+        box.innerHTML = '<p class="field-help">取得中...</p>';
+        try {{
+          const res = await fetch('/remote/diff', {{method: 'POST'}});
+          const data = await res.json();
+          if (!data.ok) {{
+            box.innerHTML = `<p class="field-error">${{escapeHtml(data.message || '差分の取得に失敗しました')}}</p>`;
+            return;
+          }}
+          if (data.identical) {{
+            box.innerHTML = '<p class="field-help">ローカルとラズパイのconfig.pyは完全に一致しています。</p>';
+            return;
+          }}
+          box.innerHTML = `<pre class="codelog-pre remote-diff-pre">${{remoteRenderDiff(data.diff)}}</pre>`;
+        }} catch (e) {{
+          showToast('通信エラー: ' + e, true);
+        }}
+      }}
+
+      async function remotePush() {{
+        if (!confirm('ローカルのconfig.pyの内容で、ラズパイ上のconfig.pyを上書きします。よろしいですか?(上書き前にラズパイ側もバックアップされます)')) return;
+        try {{
+          const res = await fetch('/remote/push', {{method: 'POST'}});
+          const data = await res.json();
+          if (!data.ok) {{ showToast(data.message || '反映に失敗しました', true); return; }}
+          showToast('ラズパイへ反映しました(バックアップ: ' + data.backup + ')', false);
+        }} catch (e) {{
+          showToast('通信エラー: ' + e, true);
+        }}
+      }}
+
+      async function remotePull() {{
+        if (!confirm('ラズパイ上のconfig.pyの内容で、ローカルのconfig.pyを上書きします。ページは自動的に再読み込みされます。よろしいですか?')) return;
+        try {{
+          const res = await fetch('/remote/pull', {{method: 'POST'}});
+          const data = await res.json();
+          if (!data.ok) {{ showToast(data.message || '反映に失敗しました', true); return; }}
+          showToast('ラズパイの内容をローカルに反映しました(バックアップ: ' + data.backup + ')。再読み込みします...', false);
+          setTimeout(() => location.reload(), 1200);
+        }} catch (e) {{
+          showToast('通信エラー: ' + e, true);
+        }}
+      }}
+    </script>'''
+
+
 def render_advanced_sections(sections: list[dict]) -> str:
     if not sections:
         return ""
@@ -1586,6 +1875,20 @@ def render_page() -> str:
         <p>config.py の実際のコードを、カテゴリごとにそのまま表示します(読み取り専用)。</p>
       </div>
       {render_code_log_panel(code_log)}
+    </section>'''
+
+    # 8個目のタブ: SSH経由でのラズパイ接続・config.py相互反映(処理カテゴリではなく
+    # 横断的なユーティリティタブなので、CURATED_FIELDS/CATEGORIESには参加させない)
+    tabs_nav += '<button class="tab-btn" data-tab="remote" onclick="switchTab(\'remote\')">🔌 ラズパイ連携</button>'
+    panels += f'''
+    <section class="tab-panel" id="panel-remote">
+      <div class="panel-head" style="background:{PALETTE["cyan_tint"]}">
+        <h2>🔌 ラズパイ連携</h2>
+        <p>SSHでラズパイに接続し、config.pyの差分確認・相互反映を行います。</p>
+      </div>
+      <div class="card">
+        <div class="card-body" style="border-color:{PALETTE["cyan"]}22">{render_remote_widget()}</div>
+      </div>
     </section>'''
 
     field_meta_js = {key: dict(kind=f["kind"], **curated_meta[key])
@@ -1807,6 +2110,15 @@ HTML_SHELL = f'''<!doctype html>
     position: absolute; top: -1.4em; left: -2px; background: var(--orange); color: #fff;
     font-size: 0.68rem; font-weight: 700; padding: 0.05rem 0.35rem; border-radius: 4px; white-space: nowrap;
   }}
+
+  /* ラズパイ連携タブ */
+  .remote-diff-pre {{ margin-top: 0.6rem; white-space: pre; }}
+  .remote-diff-pre span {{ display: block; }}
+  .remote-diff-pre .diff-add {{ color: #7CE0A8; }}
+  .remote-diff-pre .diff-remove {{ color: #FF9B8A; }}
+  .remote-diff-pre .diff-file {{ color: #FFD37A; font-weight: 700; }}
+  .remote-diff-pre .diff-hunk {{ color: #8FA0C7; }}
+  .remote-diff-pre .diff-context {{ color: #C7CEDE; }}
 
   /* センサー配置図 */
   .car-diagram-wrap {{ display: flex; justify-content: center; padding: 0.4rem 0 0.2rem; }}
@@ -2497,6 +2809,26 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/yolo/test":
                 result = run_yolo_test(posted.get("image_base64", ""), posted.get("overrides", {}))
                 self._send_json(200, dict(ok=True, **result))
+
+            elif self.path == "/remote/connection/save":
+                conn = save_ssh_connection(posted)
+                self._send_json(200, dict(ok=True, connection=conn))
+
+            elif self.path == "/remote/test":
+                result = test_ssh_connection()
+                self._send_json(200, dict(ok=True, **result))
+
+            elif self.path == "/remote/diff":
+                result = diff_local_remote()
+                self._send_json(200, dict(ok=True, **result))
+
+            elif self.path == "/remote/push":
+                backup = push_local_config_to_remote()
+                self._send_json(200, dict(ok=True, backup=backup))
+
+            elif self.path == "/remote/pull":
+                backup_path = pull_remote_config_to_local()
+                self._send_json(200, dict(ok=True, backup=backup_path.name))
 
             else:
                 self.send_response(404)
