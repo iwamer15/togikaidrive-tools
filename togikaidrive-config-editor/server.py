@@ -27,6 +27,7 @@ import hashlib
 import html
 import importlib
 import json
+import posixpath
 import re
 import shlex
 import shutil
@@ -1020,6 +1021,198 @@ def pull_remote_config_to_local() -> Path:
 
 
 # ---------------------------------------------------------------------------
+# ディレクトリ監査(data/ と models/ の ローカル ⇔ ラズパイ 比較・同期)
+# config.pyは1ファイルなので丸ごと上書きでも安全だったが、data/models配下は
+# 大量ファイル・大容量(走行データ、学習済みモデル)なので、config.pyと同じ
+# 「片方の内容で丸ごと上書き」は事故のもと。ここでは常に
+#   1. まず読み取り専用で「どのフォルダ/ファイルがローカルのみ・ラズパイのみ・
+#      両方にあるが中身が違う・一致」かを一覧表示する(監査)
+#   2. 一致しない項目だけ、フォルダ単位で明示的にpull/pushする
+# という2段構えにし、削除は一切行わない(rsyncに --delete を付けない。
+# 転送は常に「追加・更新」のみ)。
+# 監査対象ディレクトリはこのファイル内の固定リスト(AUDIT_DIRS)のみで、
+# ユーザー入力で任意のパスを指定させることはしない。転送対象のエントリ名は
+# 都度、英数字・._-のみの安全な文字列であることを検証してから使う
+# (パストラバーサル対策)。
+# ---------------------------------------------------------------------------
+AUDIT_DIRS = ["data", "models"]
+_SAFE_ENTRY_NAME = re.compile(r"[A-Za-z0-9_.\-]+")
+
+
+def _remote_base_dir(conn: dict) -> str:
+    remote_path = conn.get("remote_config_path") or ""
+    if not remote_path:
+        raise ValueError("ラズパイ上のconfig.pyのパスを設定してください(togikaidrive-devの場所の特定に使います)")
+    return posixpath.dirname(remote_path)
+
+
+def list_local_dir_entries(dir_name: str) -> dict:
+    """ローカルの <togikaidrive-dev>/<dir_name> 直下の各エントリについて、
+    種別・合計バイト数(ディレクトリは再帰合計)・ファイル数・更新日時を返す。"""
+    base = TOGIKAIDRIVE_DEV_DIR / dir_name
+    entries = {}
+    if not base.is_dir():
+        return entries
+    for child in base.iterdir():
+        if child.name.startswith("."):
+            continue  # .DS_Store等は監査対象外
+        try:
+            if child.is_dir():
+                total = 0
+                count = 0
+                for p in child.rglob("*"):
+                    if p.is_file():
+                        total += p.stat().st_size
+                        count += 1
+                mtime = child.stat().st_mtime
+                entries[child.name] = dict(type="dir", size=total, count=count, mtime=mtime)
+            else:
+                st = child.stat()
+                entries[child.name] = dict(type="file", size=st.st_size, count=1, mtime=st.st_mtime)
+        except OSError:
+            continue  # 権限エラー等はスキップ(監査全体は止めない)
+    return entries
+
+
+def list_remote_dir_entries(conn: dict, dir_name: str) -> dict:
+    """list_local_dir_entriesのラズパイ版。固定のシェルスニペットを1回のssh呼び出しで
+    実行し、"種別\\t名前\\tバイト数\\tファイル数\\t更新日時(epoch秒)"を1行ずつ返させる。
+    dir_nameはAUDIT_DIRSの固定値のみを渡す前提(呼び出し側で検証済み)。"""
+    remote_dir = posixpath.join(_remote_base_dir(conn), dir_name)
+    quoted_dir = shlex.quote(remote_dir)
+    script = (
+        f"[ -d {quoted_dir} ] || exit 0; "
+        f"for f in {quoted_dir}/*; do "
+        '[ -e "$f" ] || continue; '
+        'name=$(basename "$f"); '
+        'case "$name" in .*) continue;; esac; '
+        'if [ -d "$f" ]; then '
+        "  sz=$(find \"$f\" -type f -printf '%s\\n' 2>/dev/null | awk '{s+=$1} END{print s+0}'); "
+        '  cnt=$(find "$f" -type f 2>/dev/null | wc -l | tr -d " "); '
+        "  ty=d; "
+        "else "
+        '  sz=$(stat -c %s "$f" 2>/dev/null || echo 0); '
+        "  cnt=1; ty=f; "
+        "fi; "
+        'mt=$(stat -c %Y "$f" 2>/dev/null || echo 0); '
+        'printf "%s\\t%s\\t%s\\t%s\\t%s\\n" "$ty" "$name" "$sz" "$cnt" "$mt"; '
+        "done"
+    )
+    code, out, err = _run_ssh(conn, script, timeout=30)
+    if code != 0:
+        raise ValueError(f"ラズパイ側の{dir_name}/を確認できませんでした: {err.decode('utf-8', 'replace').strip()}")
+    entries = {}
+    for line in out.decode("utf-8", "replace").splitlines():
+        parts = line.split("\t")
+        if len(parts) != 5:
+            continue
+        ty, name, sz, cnt, mt = parts
+        try:
+            entries[name] = dict(type=("dir" if ty == "d" else "file"),
+                                  size=int(sz), count=int(cnt), mtime=float(mt))
+        except ValueError:
+            continue
+    return entries
+
+
+def build_directory_audit() -> dict:
+    conn = load_ssh_connection()
+    result = {}
+    for dir_name in AUDIT_DIRS:
+        local_entries = list_local_dir_entries(dir_name)
+        remote_entries = list_remote_dir_entries(conn, dir_name)
+        names = sorted(set(local_entries) | set(remote_entries), key=str.lower)
+        rows = []
+        for name in names:
+            local = local_entries.get(name)
+            remote = remote_entries.get(name)
+            if local and remote:
+                status = "same" if (local["size"] == remote["size"] and local["count"] == remote["count"]) else "differs"
+            elif local:
+                status = "local_only"
+            else:
+                status = "remote_only"
+            rows.append(dict(name=name, local=local, remote=remote, status=status))
+        result[dir_name] = rows
+    return result
+
+
+def _validate_audit_target(dir_name: str, entry_name: str) -> None:
+    if dir_name not in AUDIT_DIRS:
+        raise ValueError(f"不明なディレクトリです: {dir_name}")
+    if not entry_name or not _SAFE_ENTRY_NAME.fullmatch(entry_name):
+        raise ValueError("不正なファイル/フォルダ名です")
+
+
+def _require_rsync() -> str:
+    rsync_bin = shutil.which("rsync")
+    if not rsync_bin:
+        raise ValueError("rsyncコマンドが見つかりません(このMac・ラズパイ双方にrsyncが必要です)")
+    return rsync_bin
+
+
+def _rsync_ssh_option(conn: dict) -> str:
+    """rsyncの -e オプションに渡す、通常のssh呼び出しと同じ接続オプション文字列。"""
+    parts = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+              "-o", "StrictHostKeyChecking=accept-new", "-p", str(conn.get("port") or 22)]
+    if conn.get("identity_file"):
+        parts += ["-i", conn["identity_file"]]
+    return " ".join(shlex.quote(p) for p in parts)
+
+
+def _run_rsync(args: list, timeout: int = 300):
+    try:
+        proc = subprocess.run(args, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise ValueError("転送がタイムアウトしました(データ量が多い場合はターミナルから直接rsync/scpを実行してください)")
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def audit_pull(dir_name: str, entry_name: str, is_dir: bool) -> None:
+    """ラズパイ側の<dir_name>/<entry_name>をローカルに取り込む(追加・更新のみ。
+    ローカルにしか無いファイルの削除は行わない。--deleteを付けない)。"""
+    _validate_audit_target(dir_name, entry_name)
+    conn = load_ssh_connection()
+    rsync_bin = _require_rsync()
+    remote_base = _remote_base_dir(conn)
+    remote_path = posixpath.join(remote_base, dir_name, entry_name)
+    local_path = TOGIKAIDRIVE_DEV_DIR / dir_name / entry_name
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    host_spec = f"{conn.get('user') or 'pi'}@{conn['host']}"
+    if is_dir:
+        src, dst = f"{host_spec}:{remote_path}/", f"{local_path}/"
+    else:
+        src, dst = f"{host_spec}:{remote_path}", str(local_path)
+    args = [rsync_bin, "-az", "-e", _rsync_ssh_option(conn), src, dst]
+    code, _out, err = _run_rsync(args)
+    if code != 0:
+        raise ValueError(f"取り込みに失敗しました: {err.decode('utf-8', 'replace').strip()}")
+
+
+def audit_push(dir_name: str, entry_name: str, is_dir: bool) -> None:
+    """ローカルの<dir_name>/<entry_name>をラズパイに送る(追加・更新のみ)。"""
+    _validate_audit_target(dir_name, entry_name)
+    conn = load_ssh_connection()
+    rsync_bin = _require_rsync()
+    remote_base = _remote_base_dir(conn)
+    remote_path = posixpath.join(remote_base, dir_name, entry_name)
+    local_path = TOGIKAIDRIVE_DEV_DIR / dir_name / entry_name
+    if not local_path.exists():
+        raise ValueError(f"ローカルに見つかりません: {local_path}")
+    host_spec = f"{conn.get('user') or 'pi'}@{conn['host']}"
+    # 送り先の親ディレクトリを先に作っておく(mkdir -p は固定コマンド+安全な引数のみ)
+    _run_ssh(conn, f"mkdir -p {shlex.quote(posixpath.join(remote_base, dir_name))}")
+    if is_dir:
+        src, dst = f"{local_path}/", f"{host_spec}:{remote_path}/"
+    else:
+        src, dst = str(local_path), f"{host_spec}:{remote_path}"
+    args = [rsync_bin, "-az", "-e", _rsync_ssh_option(conn), src, dst]
+    code, _out, err = _run_rsync(args)
+    if code != 0:
+        raise ValueError(f"送信に失敗しました: {err.decode('utf-8', 'replace').strip()}")
+
+
+# ---------------------------------------------------------------------------
 # キャッシュ
 # 起動時にconfig.pyを読み込んでパース結果一式をキャッシュし、以降はハッシュが
 # 一致する限り再パースせずに使い回す。/save や テンプレート適用など、config.py
@@ -1646,6 +1839,19 @@ def render_remote_widget() -> str:
       </div>
       <div id="remote-diff-result"></div>
     </div>
+
+    <div class="motor-widget">
+      <div class="motor-widget-head"><h3>🗂 ディレクトリ監査(data / models)</h3></div>
+      <p class="field-help">
+        走行データ(<code>data/</code>)・学習済みモデル(<code>models/</code>)について、ローカルとラズパイに
+        それぞれ何があるかを比較します。<b>削除は一切行いません</b>(フォルダ/ファイル単位で、無い側に
+        追加・更新するだけです)。差分がある項目だけ、必要な方向へ個別に反映してください。
+      </p>
+      <div class="lock-buttons">
+        <button type="button" onclick="remoteAuditScan()">監査を実行</button>
+      </div>
+      <div id="remote-audit-result"></div>
+    </div>
     <script>
       function remoteCollectConnection() {{
         return {{
@@ -1744,6 +1950,85 @@ def render_remote_widget() -> str:
           if (!data.ok) {{ showToast(data.message || '反映に失敗しました', true); return; }}
           showToast('ラズパイの内容をローカルに反映しました(バックアップ: ' + data.backup + ')。再読み込みします...', false);
           setTimeout(() => location.reload(), 1200);
+        }} catch (e) {{
+          showToast('通信エラー: ' + e, true);
+        }}
+      }}
+
+      function remoteFormatSize(bytes) {{
+        if (bytes == null) return '-';
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+      }}
+
+      const REMOTE_AUDIT_STATUS_LABEL = {{
+        same: '✅ 一致', differs: '⚠️ 差分あり', local_only: '💻 ローカルのみ', remote_only: '🍓 ラズパイのみ',
+      }};
+
+      function remoteAuditRow(dirName, row) {{
+        const local = row.local, remote = row.remote;
+        const isDir = (local && local.type === 'dir') || (remote && remote.type === 'dir');
+        const icon = isDir ? '📁' : '📄';
+        let actions = '';
+        if (row.status === 'local_only' || row.status === 'differs') {{
+          actions += `<button type="button" onclick="remoteAuditTransfer('push','${{dirName}}','${{escapeHtml(row.name)}}',${{isDir}})">→ ラズパイへpush</button>`;
+        }}
+        if (row.status === 'remote_only' || row.status === 'differs') {{
+          actions += `<button type="button" onclick="remoteAuditTransfer('pull','${{dirName}}','${{escapeHtml(row.name)}}',${{isDir}})">← ローカルへpull</button>`;
+        }}
+        return `<tr>
+          <td>${{icon}} ${{escapeHtml(row.name)}}</td>
+          <td>${{local ? remoteFormatSize(local.size) + '(' + local.count + '件)' : '-'}}</td>
+          <td>${{remote ? remoteFormatSize(remote.size) + '(' + remote.count + '件)' : '-'}}</td>
+          <td>${{REMOTE_AUDIT_STATUS_LABEL[row.status] || row.status}}</td>
+          <td class="audit-actions">${{actions}}</td>
+        </tr>`;
+      }}
+
+      function remoteRenderAudit(audit) {{
+        return Object.keys(audit).map(dirName => {{
+          const rows = audit[dirName];
+          if (!rows.length) {{
+            return `<h4>${{escapeHtml(dirName)}}/</h4><p class="field-help">ローカル・ラズパイともに空です。</p>`;
+          }}
+          const body = rows.map(r => remoteAuditRow(dirName, r)).join('');
+          return `<h4>${{escapeHtml(dirName)}}/(${{rows.length}}件)</h4>
+            <table class="adv-table audit-table">
+              <tr><th>名前</th><th>ローカル</th><th>ラズパイ</th><th>状態</th><th>操作</th></tr>
+              ${{body}}
+            </table>`;
+        }}).join('');
+      }}
+
+      async function remoteAuditScan() {{
+        const box = document.getElementById('remote-audit-result');
+        box.innerHTML = '<p class="field-help">監査中...(ラズパイ側のファイル数によっては少し時間がかかります)</p>';
+        try {{
+          const res = await fetch('/remote/audit/scan', {{method: 'POST'}});
+          const data = await res.json();
+          if (!data.ok) {{
+            box.innerHTML = `<p class="field-error">${{escapeHtml(data.message || '監査に失敗しました')}}</p>`;
+            return;
+          }}
+          box.innerHTML = remoteRenderAudit(data.audit);
+        }} catch (e) {{
+          showToast('通信エラー: ' + e, true);
+        }}
+      }}
+
+      async function remoteAuditTransfer(direction, dirName, name, isDir) {{
+        const verb = direction === 'push' ? 'ラズパイへ送信' : 'ローカルへ取り込み';
+        if (!confirm(`「${{dirName}}/${{name}}」を${{verb}}します。よろしいですか?(既存ファイルの削除は行われません)`)) return;
+        try {{
+          const res = await fetch(`/remote/audit/${{direction}}`, {{
+            method: 'POST', headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{dir: dirName, name: name, is_dir: isDir}}),
+          }});
+          const data = await res.json();
+          if (!data.ok) {{ showToast(data.message || '転送に失敗しました', true); return; }}
+          showToast(`${{name}} を${{verb}}しました`, false);
+          remoteAuditScan();
         }} catch (e) {{
           showToast('通信エラー: ' + e, true);
         }}
@@ -2119,6 +2404,13 @@ HTML_SHELL = f'''<!doctype html>
   .remote-diff-pre .diff-file {{ color: #FFD37A; font-weight: 700; }}
   .remote-diff-pre .diff-hunk {{ color: #8FA0C7; }}
   .remote-diff-pre .diff-context {{ color: #C7CEDE; }}
+  .audit-table {{ margin: 0.5rem 0 1.2rem; }}
+  .audit-table th {{ text-align: left; font-size: 0.78rem; color: var(--muted); padding: 0.3rem 0.4rem; }}
+  .audit-table td:first-child {{ width: auto; padding-top: 0.5rem; }}
+  .audit-actions button {{
+    background: var(--steel); color: #fff; border: none; padding: 0.35rem 0.6rem; border-radius: 6px;
+    font-size: 0.72rem; font-weight: 700; cursor: pointer; margin-right: 0.3rem; white-space: nowrap;
+  }}
 
   /* センサー配置図 */
   .car-diagram-wrap {{ display: flex; justify-content: center; padding: 0.4rem 0 0.2rem; }}
@@ -2829,6 +3121,17 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/remote/pull":
                 backup_path = pull_remote_config_to_local()
                 self._send_json(200, dict(ok=True, backup=backup_path.name))
+
+            elif self.path == "/remote/audit/scan":
+                self._send_json(200, dict(ok=True, audit=build_directory_audit()))
+
+            elif self.path == "/remote/audit/pull":
+                audit_pull(posted.get("dir", ""), posted.get("name", ""), bool(posted.get("is_dir")))
+                self._send_json(200, dict(ok=True))
+
+            elif self.path == "/remote/audit/push":
+                audit_push(posted.get("dir", ""), posted.get("name", ""), bool(posted.get("is_dir")))
+                self._send_json(200, dict(ok=True))
 
             else:
                 self.send_response(404)
