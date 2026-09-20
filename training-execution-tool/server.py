@@ -40,6 +40,11 @@ TOGIKAIDRIVE_DEV_DIR = TOOLS_ROOT / "togikaidrive-dev"
 CONFIG_EDITOR_DIR = TOOLS_ROOT / "togikaidrive-config-editor"
 DATA_PREPROCESS_DIR = TOOLS_ROOT / "data-preprocessing-tool"
 
+# ポータル(togikaidrive-portal)がタブとして埋め込む際に使うメタ情報
+PANEL_ID = "train"
+PANEL_TITLE = "学習実行"
+PANEL_ICON = "🚀"
+
 
 def _load_sibling_module(name: str, path: Path):
     """兄弟ツールのserver.pyを読み込む。両方とも同名(server.py)なので、
@@ -58,6 +63,7 @@ def _load_sibling_module(name: str, path: Path):
 # 再利用できるようにする(sys.modules["server"]を先に埋めておく)。
 sys.path.insert(0, str(TOOLS_ROOT))
 from shared import ui_kit  # noqa: E402
+from shared.http_kit import JSONHandlerMixin  # noqa: E402
 
 sys.path.insert(0, str(CONFIG_EDITOR_DIR))
 import server as config_editor  # noqa: E402
@@ -325,7 +331,7 @@ HTML_SHELL = f'''<!doctype html>
   </div>
 </main>
 <script>
-const FOLDERS = __FOLDERS__;
+const TRAIN_FOLDERS = __FOLDERS__;
 const CONFIG = __CONFIG__;
 let POLL_TIMER = null;
 let LOG_SINCE = 0;
@@ -349,11 +355,11 @@ renderConfigTable();
 
 function renderFolderSelect() {{
   const sel = document.getElementById('folder-select');
-  if (!FOLDERS.length) {{
+  if (!TRAIN_FOLDERS.length) {{
     sel.innerHTML = '<option value="">(データフォルダがありません)</option>';
     return;
   }}
-  sel.innerHTML = FOLDERS.map(f => `<option value="${{f.name}}">${{f.name}} (${{f.total_records}}件)</option>`).join('');
+  sel.innerHTML = TRAIN_FOLDERS.map(f => `<option value="${{f.name}}">${{f.name}} (${{f.total_records}}件)</option>`).join('');
 }}
 renderFolderSelect();
 
@@ -454,43 +460,46 @@ function stopPolling() {{
 
 # ---------------------------------------------------------------------------
 # サーバー
+# handle_get/handle_postはこのツール単体のサーバーからも、togikaidrive-portalから
+# 埋め込まれた場合からも同じ形で呼べる(戻り値Trueならこのツールが処理済み、
+# Falseなら該当パスなし)。標準の`/`(ページ全体)はスタンドアロン起動時のみ
+# do_GETが直接返す(ポータル側は`/`を自分のトップページとして使うため)。
 # ---------------------------------------------------------------------------
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args):
-        pass
+def handle_get(handler, path: str) -> bool:
+    if path.startswith("/train/log"):
+        from urllib.parse import urlparse, parse_qs
+        qs = parse_qs(urlparse(path).query)
+        since = int((qs.get("since") or ["0"])[0])
+        handler._send_json(200, get_log(since))
+        return True
+    if path == "/train/status":
+        handler._send_json(200, get_status())
+        return True
+    return False
 
-    def _send_json(self, status: int, payload: dict) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
-    def _read_json_body(self) -> dict:
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length) if length else b""
-        return json.loads(raw.decode("utf-8")) if raw else {}
+def handle_post(handler, path: str, posted: dict) -> bool:
+    if path == "/train/start":
+        start_training(posted.get("folder", ""), posted.get("epochs"),
+                        bool(posted.get("continue_training")))
+        handler._send_json(200, dict(ok=True))
+        return True
+    if path == "/train/stop":
+        stop_training()
+        handler._send_json(200, dict(ok=True))
+        return True
+    return False
 
+
+class Handler(JSONHandlerMixin, BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/index.html"):
-            body = render_page().encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
-            self.end_headers()
-            self.wfile.write(body)
-        elif self.path.startswith("/train/log"):
-            from urllib.parse import urlparse, parse_qs
-            qs = parse_qs(urlparse(self.path).query)
-            since = int((qs.get("since") or ["0"])[0])
-            self._send_json(200, get_log(since))
-        elif self.path == "/train/status":
-            self._send_json(200, get_status())
+            self._send_html(render_page())
         elif self.path == "/favicon.ico":
             self.send_response(204)
             self.end_headers()
+        elif handle_get(self, self.path):
+            pass
         else:
             self.send_response(404)
             self.end_headers()
@@ -498,14 +507,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             posted = self._read_json_body()
-            if self.path == "/train/start":
-                start_training(posted.get("folder", ""), posted.get("epochs"),
-                                bool(posted.get("continue_training")))
-                self._send_json(200, dict(ok=True))
-            elif self.path == "/train/stop":
-                stop_training()
-                self._send_json(200, dict(ok=True))
-            else:
+            if not handle_post(self, self.path, posted):
                 self.send_response(404)
                 self.end_headers()
         except ValueError as e:

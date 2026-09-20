@@ -41,9 +41,15 @@ TOOLS_ROOT = HERE.parent  # ト技会-minicar/ (togikaidrive-tools リポジト�
 TOGIKAIDRIVE_DEV_DIR = TOOLS_ROOT / "togikaidrive-dev"
 DATA_DIR = TOGIKAIDRIVE_DEV_DIR / "data"
 
+# ポータル(togikaidrive-portal)がタブとして埋め込む際に使うメタ情報
+PANEL_ID = "prep"
+PANEL_TITLE = "前処理"
+PANEL_ICON = "🧹"
+
 # デザイン(PALETTE)とHTMLエスケープは3ツール共通のshared/ui_kit.pyを使う。
 sys.path.insert(0, str(TOOLS_ROOT))
 from shared import ui_kit  # noqa: E402
+from shared.http_kit import JSONHandlerMixin  # noqa: E402
 
 PALETTE = ui_kit.PALETTE
 _html_escape = ui_kit.html_escape
@@ -602,47 +608,42 @@ async function saveDeletions() {{
 
 # ---------------------------------------------------------------------------
 # サーバー
+# handle_get/handle_postはこのツール単体のサーバーからも、togikaidrive-portalから
+# 埋め込まれた場合からも同じ形で呼べる(戻り値Trueならこのツールが処理済み)。
 # ---------------------------------------------------------------------------
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args):
-        pass
+def handle_get(handler, path: str) -> bool:
+    if path.startswith("/api/records"):
+        from urllib.parse import urlparse, parse_qs
+        qs = parse_qs(urlparse(path).query)
+        folder = (qs.get("folder") or [""])[0]
+        folder_path = DATA_DIR / folder
+        if not folder or not folder_path.is_dir():
+            handler._send_json(400, dict(ok=False, message="データフォルダが見つかりません"))
+            return True
+        records = read_all_records(folder_path)
+        catalog_count = len(list_catalog_files(folder_path))
+        handler._send_json(200, dict(ok=True, folder=folder, records=records, catalog_count=catalog_count))
+        return True
+    return False
 
-    def _send_json(self, status: int, payload: dict) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
-    def _read_json_body(self) -> dict:
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length) if length else b""
-        return json.loads(raw.decode("utf-8")) if raw else {}
+def handle_post(handler, path: str, posted: dict) -> bool:
+    if path == "/api/save":
+        result = apply_deletions(posted.get("folder", ""), posted.get("delete_ranges", []))
+        handler._send_json(200, dict(ok=True, **result))
+        return True
+    return False
 
+
+class Handler(JSONHandlerMixin, BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/index.html"):
-            body = render_page().encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
-            self.end_headers()
-            self.wfile.write(body)
-        elif self.path.startswith("/api/records"):
-            from urllib.parse import urlparse, parse_qs
-            qs = parse_qs(urlparse(self.path).query)
-            folder = (qs.get("folder") or [""])[0]
-            folder_path = DATA_DIR / folder
-            if not folder or not folder_path.is_dir():
-                self._send_json(400, dict(ok=False, message="データフォルダが見つかりません"))
-                return
-            records = read_all_records(folder_path)
-            catalog_count = len(list_catalog_files(folder_path))
-            self._send_json(200, dict(ok=True, folder=folder, records=records, catalog_count=catalog_count))
+            self._send_html(render_page())
         elif self.path == "/favicon.ico":
             self.send_response(204)
             self.end_headers()
+        elif handle_get(self, self.path):
+            pass
         else:
             self.send_response(404)
             self.end_headers()
@@ -650,10 +651,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             posted = self._read_json_body()
-            if self.path == "/api/save":
-                result = apply_deletions(posted.get("folder", ""), posted.get("delete_ranges", []))
-                self._send_json(200, dict(ok=True, **result))
-            else:
+            if not handle_post(self, self.path, posted):
                 self.send_response(404)
                 self.end_headers()
         except ValueError as e:

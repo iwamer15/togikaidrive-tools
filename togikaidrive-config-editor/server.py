@@ -40,10 +40,16 @@ TOOLS_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = TOOLS_ROOT / "togikaidrive-dev" / "config.py"
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
+# ポータル(togikaidrive-portal)がタブとして埋め込む際に使うメタ情報
+PANEL_ID = "config"
+PANEL_TITLE = "設定エディタ"
+PANEL_ICON = "🔧"
+
 # 色パレット・HTMLエスケープ・SSH/ラズパイ連携は3ツール共通のshared/配下のモジュール
 # (このファイル固有のドメイン知識を持たない)を使う。
 sys.path.insert(0, str(TOOLS_ROOT))
 from shared import remote_link, ui_kit  # noqa: E402
+from shared.http_kit import JSONHandlerMixin  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # ミニカー処理カテゴリ(6分類)
@@ -2718,42 +2724,151 @@ async function deleteTemplate(name) {{
 # ---------------------------------------------------------------------------
 # サーバー
 # ---------------------------------------------------------------------------
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args):
-        pass  # 標準出力を静かに保つ
+def handle_get(handler, path: str) -> bool:
+    """このツール単体のサーバーからも、togikaidrive-portalから埋め込まれた場合からも
+    同じ形で呼べる(戻り値Trueならこのツールが処理済み)。"""
+    if path == "/reload":
+        _snap, regenerated = get_snapshot(force=False)
+        handler._send_json(200, dict(ok=True, regenerated=regenerated))
+        return True
+    if path == "/templates":
+        handler._send_json(200, dict(ok=True, templates=list_templates()))
+        return True
+    return False
 
-    def _send_json(self, status: int, payload: dict) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
-    def _read_json_body(self) -> dict:
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length) if length else b""
-        return json.loads(raw.decode("utf-8")) if raw else {}
+def handle_post(handler, path: str, posted: dict) -> bool:
+    if path == "/save":
+        snap, _ = get_snapshot()
+        field_defs = snap["field_defs"]
+        new_values = {}
+        kinds = {}
+        for key, value in posted.items():
+            field = field_defs.get(key)
+            if not field:
+                continue  # 未知のキーは無視(古いページ/改ざん対策)
+            kind = field["kind"]
+            new_values[key] = validate(kind, key, value, field)
+            kinds[key] = kind
+        backup = write_values(new_values, kinds, field_defs)
+        get_snapshot(force=True)  # 書き込み直後にキャッシュを作り直しておく
+        handler._send_json(200, dict(ok=True, backup=backup.name))
+        return True
 
+    if path == "/templates/save":
+        name = save_template(posted.get("name", ""))
+        handler._send_json(200, dict(ok=True, name=name))
+        return True
+
+    if path == "/templates/apply":
+        backup = apply_template(posted.get("name", ""))
+        handler._send_json(200, dict(ok=True, backup=backup.name))
+        return True
+
+    if path == "/templates/delete":
+        delete_template(posted.get("name", ""))
+        handler._send_json(200, dict(ok=True))
+        return True
+
+    if path == "/motor/live":
+        steering = max(-1.0, min(1.0, float(posted.get("steering", 0))))
+        throttle = max(-1.0, min(1.0, float(posted.get("throttle", 0))))
+        motor_instance.set_steering_pwm_value(steering)
+        motor_instance.set_throttle_pwm_value(throttle)
+        handler._send_json(200, dict(ok=True))
+        return True
+
+    if path == "/motor/raw":
+        axis = posted.get("axis")
+        value = int(posted.get("value"))
+        lo, hi = MOTOR_RAW_PWM_RANGE
+        if not (lo <= value <= hi):
+            raise ValueError(f"PWM値は{lo}〜{hi}の範囲にしてください")
+        if axis == "steering":
+            channel = motor_instance.CHANNEL_STEERING
+        elif axis == "throttle":
+            channel = motor_instance.CHANNEL_THROTTLE
+        else:
+            raise ValueError(f"不明な軸: {axis}")
+        motor_instance.pwm.set_pwm(channel, 0, value)
+        handler._send_json(200, dict(ok=True))
+        return True
+
+    if path == "/motor/stop":
+        motor_instance.set_steering_pwm_value(0)
+        motor_instance.set_throttle_pwm_value(0)
+        handler._send_json(200, dict(ok=True))
+        return True
+
+    if path == "/planner/test":
+        result = run_planner_function(
+            posted.get("func"), posted.get("side"),
+            posted.get("distances", {}), posted.get("overrides", {}),
+        )
+        handler._send_json(200, dict(ok=True, **result))
+        return True
+
+    if path == "/planner/reset":
+        reset_planner()
+        handler._send_json(200, dict(ok=True))
+        return True
+
+    if path == "/yolo/test":
+        result = run_yolo_test(posted.get("image_base64", ""), posted.get("overrides", {}))
+        handler._send_json(200, dict(ok=True, **result))
+        return True
+
+    if path == "/remote/connection/save":
+        conn = save_ssh_connection(posted)
+        handler._send_json(200, dict(ok=True, connection=conn))
+        return True
+
+    if path == "/remote/test":
+        result = test_ssh_connection()
+        handler._send_json(200, dict(ok=True, **result))
+        return True
+
+    if path == "/remote/diff":
+        result = diff_local_remote()
+        handler._send_json(200, dict(ok=True, **result))
+        return True
+
+    if path == "/remote/push":
+        backup = push_local_config_to_remote()
+        handler._send_json(200, dict(ok=True, backup=backup))
+        return True
+
+    if path == "/remote/pull":
+        backup_path = pull_remote_config_to_local()
+        handler._send_json(200, dict(ok=True, backup=backup_path.name))
+        return True
+
+    if path == "/remote/audit/scan":
+        handler._send_json(200, dict(ok=True, audit=build_directory_audit()))
+        return True
+
+    if path == "/remote/audit/pull":
+        audit_pull(posted.get("dir", ""), posted.get("name", ""), bool(posted.get("is_dir")))
+        handler._send_json(200, dict(ok=True))
+        return True
+
+    if path == "/remote/audit/push":
+        audit_push(posted.get("dir", ""), posted.get("name", ""), bool(posted.get("is_dir")))
+        handler._send_json(200, dict(ok=True))
+        return True
+
+    return False
+
+
+class Handler(JSONHandlerMixin, BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/index.html"):
-            body = render_page().encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            # 毎回config.pyを読み直して最新値を表示する設計なので、ブラウザ側の
-            # HTTPキャッシュで古いページが再利用されないようにする
-            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
-            self.end_headers()
-            self.wfile.write(body)
-        elif self.path == "/reload":
-            _snap, regenerated = get_snapshot(force=False)
-            self._send_json(200, dict(ok=True, regenerated=regenerated))
-        elif self.path == "/templates":
-            self._send_json(200, dict(ok=True, templates=list_templates()))
+            self._send_html(render_page())
         elif self.path == "/favicon.ico":
             self.send_response(204)
             self.end_headers()
+        elif handle_get(self, self.path):
+            pass
         else:
             self.send_response(404)
             self.end_headers()
@@ -2761,112 +2876,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             posted = self._read_json_body()
-
-            if self.path == "/save":
-                snap, _ = get_snapshot()
-                field_defs = snap["field_defs"]
-                new_values = {}
-                kinds = {}
-                for key, value in posted.items():
-                    field = field_defs.get(key)
-                    if not field:
-                        continue  # 未知のキーは無視(古いページ/改ざん対策)
-                    kind = field["kind"]
-                    new_values[key] = validate(kind, key, value, field)
-                    kinds[key] = kind
-                backup = write_values(new_values, kinds, field_defs)
-                get_snapshot(force=True)  # 書き込み直後にキャッシュを作り直しておく
-                self._send_json(200, dict(ok=True, backup=backup.name))
-
-            elif self.path == "/templates/save":
-                name = save_template(posted.get("name", ""))
-                self._send_json(200, dict(ok=True, name=name))
-
-            elif self.path == "/templates/apply":
-                backup = apply_template(posted.get("name", ""))
-                self._send_json(200, dict(ok=True, backup=backup.name))
-
-            elif self.path == "/templates/delete":
-                delete_template(posted.get("name", ""))
-                self._send_json(200, dict(ok=True))
-
-            elif self.path == "/motor/live":
-                steering = max(-1.0, min(1.0, float(posted.get("steering", 0))))
-                throttle = max(-1.0, min(1.0, float(posted.get("throttle", 0))))
-                motor_instance.set_steering_pwm_value(steering)
-                motor_instance.set_throttle_pwm_value(throttle)
-                self._send_json(200, dict(ok=True))
-
-            elif self.path == "/motor/raw":
-                axis = posted.get("axis")
-                value = int(posted.get("value"))
-                lo, hi = MOTOR_RAW_PWM_RANGE
-                if not (lo <= value <= hi):
-                    raise ValueError(f"PWM値は{lo}〜{hi}の範囲にしてください")
-                if axis == "steering":
-                    channel = motor_instance.CHANNEL_STEERING
-                elif axis == "throttle":
-                    channel = motor_instance.CHANNEL_THROTTLE
-                else:
-                    raise ValueError(f"不明な軸: {axis}")
-                motor_instance.pwm.set_pwm(channel, 0, value)
-                self._send_json(200, dict(ok=True))
-
-            elif self.path == "/motor/stop":
-                motor_instance.set_steering_pwm_value(0)
-                motor_instance.set_throttle_pwm_value(0)
-                self._send_json(200, dict(ok=True))
-
-            elif self.path == "/planner/test":
-                result = run_planner_function(
-                    posted.get("func"), posted.get("side"),
-                    posted.get("distances", {}), posted.get("overrides", {}),
-                )
-                self._send_json(200, dict(ok=True, **result))
-
-            elif self.path == "/planner/reset":
-                reset_planner()
-                self._send_json(200, dict(ok=True))
-
-            elif self.path == "/yolo/test":
-                result = run_yolo_test(posted.get("image_base64", ""), posted.get("overrides", {}))
-                self._send_json(200, dict(ok=True, **result))
-
-            elif self.path == "/remote/connection/save":
-                conn = save_ssh_connection(posted)
-                self._send_json(200, dict(ok=True, connection=conn))
-
-            elif self.path == "/remote/test":
-                result = test_ssh_connection()
-                self._send_json(200, dict(ok=True, **result))
-
-            elif self.path == "/remote/diff":
-                result = diff_local_remote()
-                self._send_json(200, dict(ok=True, **result))
-
-            elif self.path == "/remote/push":
-                backup = push_local_config_to_remote()
-                self._send_json(200, dict(ok=True, backup=backup))
-
-            elif self.path == "/remote/pull":
-                backup_path = pull_remote_config_to_local()
-                self._send_json(200, dict(ok=True, backup=backup_path.name))
-
-            elif self.path == "/remote/audit/scan":
-                self._send_json(200, dict(ok=True, audit=build_directory_audit()))
-
-            elif self.path == "/remote/audit/pull":
-                audit_pull(posted.get("dir", ""), posted.get("name", ""), bool(posted.get("is_dir")))
-                self._send_json(200, dict(ok=True))
-
-            elif self.path == "/remote/audit/push":
-                audit_push(posted.get("dir", ""), posted.get("name", ""), bool(posted.get("is_dir")))
-                self._send_json(200, dict(ok=True))
-
-            else:
+            if not handle_post(self, self.path, posted):
                 self.send_response(404)
                 self.end_headers()
-
         except ValueError as e:
             self._send_json(400, dict(ok=False, message=str(e)))
         except Exception as e:  # noqa: BLE001
