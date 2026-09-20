@@ -40,14 +40,13 @@ HERE = Path(__file__).resolve().parent
 TOOLS_ROOT = HERE.parent  # ト技会-minicar/ (togikaidrive-tools リポジトリ直下)
 TOGIKAIDRIVE_DEV_DIR = TOOLS_ROOT / "togikaidrive-dev"
 DATA_DIR = TOGIKAIDRIVE_DEV_DIR / "data"
-CONFIG_EDITOR_DIR = TOOLS_ROOT / "togikaidrive-config-editor"
 
-# デザイン(PALETTE)とHTMLエスケープはconfig editorのものをそのまま再利用する
-sys.path.insert(0, str(CONFIG_EDITOR_DIR))
-import server as config_editor  # noqa: E402
+# デザイン(PALETTE)とHTMLエスケープは3ツール共通のshared/ui_kit.pyを使う。
+sys.path.insert(0, str(TOOLS_ROOT))
+from shared import ui_kit  # noqa: E402
 
-PALETTE = config_editor.PALETTE
-_html_escape = config_editor._html_escape
+PALETTE = ui_kit.PALETTE
+_html_escape = ui_kit.html_escape
 
 SENSOR_PREFIXES = ("ultrasonic/", "lidar/")
 

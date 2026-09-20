@@ -22,17 +22,13 @@ from __future__ import annotations
 
 import ast
 import base64
-import difflib
 import hashlib
-import html
 import importlib
 import json
 import posixpath
 import re
-import shlex
 import shutil
 import socket
-import subprocess
 import sys
 import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -40,8 +36,14 @@ from pathlib import Path
 
 PORT = 8899
 # togikaidrive-config-editor/ と togikaidrive-dev/ は ト技会-minicar/ 直下の兄弟フォルダ
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "togikaidrive-dev" / "config.py"
+TOOLS_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_PATH = TOOLS_ROOT / "togikaidrive-dev" / "config.py"
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+
+# 色パレット・HTMLエスケープ・SSH/ラズパイ連携は3ツール共通のshared/配下のモジュール
+# (このファイル固有のドメイン知識を持たない)を使う。
+sys.path.insert(0, str(TOOLS_ROOT))
+from shared import remote_link, ui_kit  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # ミニカー処理カテゴリ(6分類)
@@ -579,11 +581,7 @@ def write_values(new_values: dict, kinds: dict, fields_by_key: dict) -> Path:
 
 
 def _make_backup() -> Path:
-    backup_path = CONFIG_PATH.with_name(
-        f"config.py.bak.{datetime.datetime.now():%Y%m%d_%H%M%S}"
-    )
-    shutil.copy2(CONFIG_PATH, backup_path)
-    return backup_path
+    return remote_link.backup_file(CONFIG_PATH)
 
 
 # ---------------------------------------------------------------------------
@@ -889,327 +887,64 @@ def run_yolo_test(image_b64: str, overrides: dict) -> dict:
 
 # ---------------------------------------------------------------------------
 # ラズパイ(SSH)連携
-# 「🔌 ラズパイ連携」タブで使う。ラズパイ上のconfig.pyとの差分確認・相互反映を
-# ブラウザから行えるようにする。追加のpipライブラリを増やさない方針を維持するため、
-# paramiko等は使わずシステムのssh(OpenSSHクライアント。macOS/ラズパイOS双方に標準
-# 搭載)をsubprocessで呼び出すだけにする。実行するリモートコマンドはすべて
-# このファイル内で固定で組み立てたもの(cat/cp)のみで、外部からの自由なコマンド
-# 入力は受け付けない。
-# 接続情報(ホスト名・ユーザー名・鍵ファイルパス・リモートconfig.pyのパス)は、
-# このツール専用のローカルJSON(ssh_connection.json、.gitignore済み)に保存する。
-# パスワード認証はサポートしない(BatchMode=yesを常に付け、鍵認証が使えない場合は
-# パスワード入力待ちで固まらず即座にエラーになるようにする)。
+# 「🔌 ラズパイ連携」タブで使う。実体は shared/remote_link.py(3ツール共通、
+# config.py等のドメイン知識を持たない)で、ここではconfig.py固有のパス組み立てだけを
+# 行う薄いラッパーにしている。接続設定は shared/ssh_connection.json に保存される
+# (3ツールで共有。.gitignore済み)。
 # ---------------------------------------------------------------------------
-SSH_CONNECTION_PATH = Path(__file__).resolve().parent / "ssh_connection.json"
-_DEFAULT_SSH_CONNECTION = dict(host="", user="pi", port=22, identity_file="", remote_config_path="")
+AUDIT_DIRS = ["data", "models"]
 
 
 def load_ssh_connection() -> dict:
-    if not SSH_CONNECTION_PATH.is_file():
-        return dict(_DEFAULT_SSH_CONNECTION)
-    try:
-        data = json.loads(SSH_CONNECTION_PATH.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001  -- 壊れたJSONの場合はデフォルトに戻す
-        return dict(_DEFAULT_SSH_CONNECTION)
-    conn = dict(_DEFAULT_SSH_CONNECTION)
-    conn.update({k: data[k] for k in _DEFAULT_SSH_CONNECTION if k in data})
-    return conn
+    return remote_link.load_connection()
 
 
 def save_ssh_connection(data: dict) -> dict:
-    conn = dict(_DEFAULT_SSH_CONNECTION)
-    conn["host"] = str(data.get("host", "")).strip()
-    conn["user"] = str(data.get("user", "pi")).strip() or "pi"
-    try:
-        conn["port"] = int(data.get("port") or 22)
-    except (TypeError, ValueError):
-        raise ValueError("ポート番号は整数で入力してください")
-    conn["identity_file"] = str(data.get("identity_file", "")).strip()
-    conn["remote_config_path"] = str(data.get("remote_config_path", "")).strip()
-    if not conn["host"]:
-        raise ValueError("ホスト名(またはIPアドレス)を入力してください")
-    if not conn["remote_config_path"]:
-        raise ValueError("ラズパイ上のconfig.pyのパスを入力してください")
-    SSH_CONNECTION_PATH.write_text(json.dumps(conn, ensure_ascii=False, indent=2), encoding="utf-8")
-    return conn
-
-
-def _ssh_base_args(conn: dict) -> list:
-    if not conn.get("host"):
-        raise ValueError("先に接続設定(ホスト名)を保存してください")
-    ssh_bin = shutil.which("ssh")
-    if not ssh_bin:
-        raise ValueError("sshコマンドが見つかりません(OpenSSHクライアントが必要です)")
-    args = [ssh_bin, "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
-            "-o", "StrictHostKeyChecking=accept-new", "-p", str(conn.get("port") or 22)]
-    if conn.get("identity_file"):
-        args += ["-i", conn["identity_file"]]
-    args.append(f"{conn.get('user') or 'pi'}@{conn['host']}")
-    return args
-
-
-def _run_ssh(conn: dict, remote_command: str, input_bytes: bytes | None = None, timeout: int = 15):
-    """remote_command はこのファイル内で固定で組み立てた文字列のみを渡すこと
-    (ユーザーの自由入力をそのまま渡さない)。"""
-    args = _ssh_base_args(conn) + [remote_command]
-    try:
-        proc = subprocess.run(args, input=input_bytes, capture_output=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise ValueError("接続がタイムアウトしました(ホスト名・ポート・電源・鍵認証の設定を確認してください)")
-    except FileNotFoundError:
-        raise ValueError("sshコマンドの実行に失敗しました")
-    return proc.returncode, proc.stdout, proc.stderr
+    return remote_link.save_connection(data)
 
 
 def test_ssh_connection() -> dict:
-    conn = load_ssh_connection()
-    code, out, err = _run_ssh(conn, "echo OK && hostname && (python3 --version 2>&1)")
-    if code != 0:
-        raise ValueError(f"接続に失敗しました: {err.decode('utf-8', 'replace').strip() or '(詳細不明。SSH鍵認証が設定されているか確認してください)'}")
-    return dict(message=out.decode("utf-8", "replace").strip())
+    return remote_link.test_connection(remote_link.load_connection())
 
 
-def fetch_remote_config_text(conn: dict) -> str:
-    remote_path = conn.get("remote_config_path")
-    if not remote_path:
-        raise ValueError("ラズパイ上のconfig.pyのパスを設定してください")
-    code, out, err = _run_ssh(conn, f"cat {shlex.quote(remote_path)}")
-    if code != 0:
-        raise ValueError(f"リモートのconfig.pyを取得できませんでした: {err.decode('utf-8', 'replace').strip()}")
-    return out.decode("utf-8", "replace")
+def _remote_config_path(conn: dict) -> str:
+    if not conn.get("remote_base_dir"):
+        raise ValueError("接続設定(ラズパイ上のtogikaidrive-devのパス)を保存してください")
+    return posixpath.join(conn["remote_base_dir"], "config.py")
 
 
 def diff_local_remote() -> dict:
-    conn = load_ssh_connection()
-    remote_text = fetch_remote_config_text(conn)
+    conn = remote_link.load_connection()
+    remote_text = remote_link.fetch_remote_text(conn, _remote_config_path(conn))
     local_text = CONFIG_PATH.read_text(encoding="utf-8")
-    diff_lines = list(difflib.unified_diff(
-        local_text.splitlines(), remote_text.splitlines(),
-        fromfile="ローカル(このMac)", tofile="ラズパイ", lineterm="",
-    ))
-    return dict(diff=diff_lines, identical=(local_text == remote_text))
+    return remote_link.diff_text(local_text, remote_text)
 
 
 def push_local_config_to_remote() -> str:
-    """ローカルのconfig.py(保存済みの内容)をラズパイに書き込む。書き込み前に必ず
-    リモート側も config.py.bak.<日時> にバックアップしてから上書きする(ローカルの
-    /save と同じ安全方針)。scpに依存せず、`cat > path` にローカルのバイト列を
-    標準入力で流し込むことで1回のssh呼び出しだけで完結させる。"""
-    conn = load_ssh_connection()
-    remote_path = conn.get("remote_config_path")
-    if not remote_path:
-        raise ValueError("ラズパイ上のconfig.pyのパスを設定してください")
-    local_bytes = CONFIG_PATH.read_bytes()
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    quoted = shlex.quote(remote_path)
-    remote_cmd = f"test -f {quoted} && cp {quoted} {quoted}.bak.{ts}; cat > {quoted}"
-    code, _out, err = _run_ssh(conn, remote_cmd, input_bytes=local_bytes)
-    if code != 0:
-        raise ValueError(f"ラズパイへの反映に失敗しました: {err.decode('utf-8', 'replace').strip()}")
-    return f"{Path(remote_path).name}.bak.{ts}"
+    conn = remote_link.load_connection()
+    return remote_link.push_text_file(conn, CONFIG_PATH, _remote_config_path(conn))
 
 
 def pull_remote_config_to_local() -> Path:
-    """ラズパイ上のconfig.pyの内容でローカルのconfig.pyを上書きする。書き込み前に
-    必ずローカルも(通常の保存と同じ)_make_backup()でバックアップする。"""
-    conn = load_ssh_connection()
-    remote_text = fetch_remote_config_text(conn)
-    backup_path = _make_backup()
-    CONFIG_PATH.write_text(remote_text, encoding="utf-8")
+    conn = remote_link.load_connection()
+    backup_path = remote_link.pull_text_file(conn, _remote_config_path(conn), CONFIG_PATH)
     invalidate_cache()
     return backup_path
 
 
-# ---------------------------------------------------------------------------
-# ディレクトリ監査(data/ と models/ の ローカル ⇔ ラズパイ 比較・同期)
-# config.pyは1ファイルなので丸ごと上書きでも安全だったが、data/models配下は
-# 大量ファイル・大容量(走行データ、学習済みモデル)なので、config.pyと同じ
-# 「片方の内容で丸ごと上書き」は事故のもと。ここでは常に
-#   1. まず読み取り専用で「どのフォルダ/ファイルがローカルのみ・ラズパイのみ・
-#      両方にあるが中身が違う・一致」かを一覧表示する(監査)
-#   2. 一致しない項目だけ、フォルダ単位で明示的にpull/pushする
-# という2段構えにし、削除は一切行わない(rsyncに --delete を付けない。
-# 転送は常に「追加・更新」のみ)。
-# 監査対象ディレクトリはこのファイル内の固定リスト(AUDIT_DIRS)のみで、
-# ユーザー入力で任意のパスを指定させることはしない。転送対象のエントリ名は
-# 都度、英数字・._-のみの安全な文字列であることを検証してから使う
-# (パストラバーサル対策)。
-# ---------------------------------------------------------------------------
-AUDIT_DIRS = ["data", "models"]
-_SAFE_ENTRY_NAME = re.compile(r"[A-Za-z0-9_.\-]+")
-
-
-def _remote_base_dir(conn: dict) -> str:
-    remote_path = conn.get("remote_config_path") or ""
-    if not remote_path:
-        raise ValueError("ラズパイ上のconfig.pyのパスを設定してください(togikaidrive-devの場所の特定に使います)")
-    return posixpath.dirname(remote_path)
-
-
-def list_local_dir_entries(dir_name: str) -> dict:
-    """ローカルの <togikaidrive-dev>/<dir_name> 直下の各エントリについて、
-    種別・合計バイト数(ディレクトリは再帰合計)・ファイル数・更新日時を返す。"""
-    base = TOGIKAIDRIVE_DEV_DIR / dir_name
-    entries = {}
-    if not base.is_dir():
-        return entries
-    for child in base.iterdir():
-        if child.name.startswith("."):
-            continue  # .DS_Store等は監査対象外
-        try:
-            if child.is_dir():
-                total = 0
-                count = 0
-                for p in child.rglob("*"):
-                    if p.is_file():
-                        total += p.stat().st_size
-                        count += 1
-                mtime = child.stat().st_mtime
-                entries[child.name] = dict(type="dir", size=total, count=count, mtime=mtime)
-            else:
-                st = child.stat()
-                entries[child.name] = dict(type="file", size=st.st_size, count=1, mtime=st.st_mtime)
-        except OSError:
-            continue  # 権限エラー等はスキップ(監査全体は止めない)
-    return entries
-
-
-def list_remote_dir_entries(conn: dict, dir_name: str) -> dict:
-    """list_local_dir_entriesのラズパイ版。固定のシェルスニペットを1回のssh呼び出しで
-    実行し、"種別\\t名前\\tバイト数\\tファイル数\\t更新日時(epoch秒)"を1行ずつ返させる。
-    dir_nameはAUDIT_DIRSの固定値のみを渡す前提(呼び出し側で検証済み)。"""
-    remote_dir = posixpath.join(_remote_base_dir(conn), dir_name)
-    quoted_dir = shlex.quote(remote_dir)
-    script = (
-        f"[ -d {quoted_dir} ] || exit 0; "
-        f"for f in {quoted_dir}/*; do "
-        '[ -e "$f" ] || continue; '
-        'name=$(basename "$f"); '
-        'case "$name" in .*) continue;; esac; '
-        'if [ -d "$f" ]; then '
-        "  sz=$(find \"$f\" -type f -printf '%s\\n' 2>/dev/null | awk '{s+=$1} END{print s+0}'); "
-        '  cnt=$(find "$f" -type f 2>/dev/null | wc -l | tr -d " "); '
-        "  ty=d; "
-        "else "
-        '  sz=$(stat -c %s "$f" 2>/dev/null || echo 0); '
-        "  cnt=1; ty=f; "
-        "fi; "
-        'mt=$(stat -c %Y "$f" 2>/dev/null || echo 0); '
-        'printf "%s\\t%s\\t%s\\t%s\\t%s\\n" "$ty" "$name" "$sz" "$cnt" "$mt"; '
-        "done"
-    )
-    code, out, err = _run_ssh(conn, script, timeout=30)
-    if code != 0:
-        raise ValueError(f"ラズパイ側の{dir_name}/を確認できませんでした: {err.decode('utf-8', 'replace').strip()}")
-    entries = {}
-    for line in out.decode("utf-8", "replace").splitlines():
-        parts = line.split("\t")
-        if len(parts) != 5:
-            continue
-        ty, name, sz, cnt, mt = parts
-        try:
-            entries[name] = dict(type=("dir" if ty == "d" else "file"),
-                                  size=int(sz), count=int(cnt), mtime=float(mt))
-        except ValueError:
-            continue
-    return entries
-
-
 def build_directory_audit() -> dict:
-    conn = load_ssh_connection()
-    result = {}
-    for dir_name in AUDIT_DIRS:
-        local_entries = list_local_dir_entries(dir_name)
-        remote_entries = list_remote_dir_entries(conn, dir_name)
-        names = sorted(set(local_entries) | set(remote_entries), key=str.lower)
-        rows = []
-        for name in names:
-            local = local_entries.get(name)
-            remote = remote_entries.get(name)
-            if local and remote:
-                status = "same" if (local["size"] == remote["size"] and local["count"] == remote["count"]) else "differs"
-            elif local:
-                status = "local_only"
-            else:
-                status = "remote_only"
-            rows.append(dict(name=name, local=local, remote=remote, status=status))
-        result[dir_name] = rows
-    return result
-
-
-def _validate_audit_target(dir_name: str, entry_name: str) -> None:
-    if dir_name not in AUDIT_DIRS:
-        raise ValueError(f"不明なディレクトリです: {dir_name}")
-    if not entry_name or not _SAFE_ENTRY_NAME.fullmatch(entry_name):
-        raise ValueError("不正なファイル/フォルダ名です")
-
-
-def _require_rsync() -> str:
-    rsync_bin = shutil.which("rsync")
-    if not rsync_bin:
-        raise ValueError("rsyncコマンドが見つかりません(このMac・ラズパイ双方にrsyncが必要です)")
-    return rsync_bin
-
-
-def _rsync_ssh_option(conn: dict) -> str:
-    """rsyncの -e オプションに渡す、通常のssh呼び出しと同じ接続オプション文字列。"""
-    parts = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
-              "-o", "StrictHostKeyChecking=accept-new", "-p", str(conn.get("port") or 22)]
-    if conn.get("identity_file"):
-        parts += ["-i", conn["identity_file"]]
-    return " ".join(shlex.quote(p) for p in parts)
-
-
-def _run_rsync(args: list, timeout: int = 300):
-    try:
-        proc = subprocess.run(args, capture_output=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise ValueError("転送がタイムアウトしました(データ量が多い場合はターミナルから直接rsync/scpを実行してください)")
-    return proc.returncode, proc.stdout, proc.stderr
+    conn = remote_link.load_connection()
+    return remote_link.build_directory_audit(conn, TOGIKAIDRIVE_DEV_DIR, AUDIT_DIRS)
 
 
 def audit_pull(dir_name: str, entry_name: str, is_dir: bool) -> None:
-    """ラズパイ側の<dir_name>/<entry_name>をローカルに取り込む(追加・更新のみ。
-    ローカルにしか無いファイルの削除は行わない。--deleteを付けない)。"""
-    _validate_audit_target(dir_name, entry_name)
-    conn = load_ssh_connection()
-    rsync_bin = _require_rsync()
-    remote_base = _remote_base_dir(conn)
-    remote_path = posixpath.join(remote_base, dir_name, entry_name)
-    local_path = TOGIKAIDRIVE_DEV_DIR / dir_name / entry_name
-    local_path.parent.mkdir(parents=True, exist_ok=True)
-    host_spec = f"{conn.get('user') or 'pi'}@{conn['host']}"
-    if is_dir:
-        src, dst = f"{host_spec}:{remote_path}/", f"{local_path}/"
-    else:
-        src, dst = f"{host_spec}:{remote_path}", str(local_path)
-    args = [rsync_bin, "-az", "-e", _rsync_ssh_option(conn), src, dst]
-    code, _out, err = _run_rsync(args)
-    if code != 0:
-        raise ValueError(f"取り込みに失敗しました: {err.decode('utf-8', 'replace').strip()}")
+    conn = remote_link.load_connection()
+    remote_link.audit_pull(conn, TOGIKAIDRIVE_DEV_DIR, AUDIT_DIRS, dir_name, entry_name, is_dir)
 
 
 def audit_push(dir_name: str, entry_name: str, is_dir: bool) -> None:
-    """ローカルの<dir_name>/<entry_name>をラズパイに送る(追加・更新のみ)。"""
-    _validate_audit_target(dir_name, entry_name)
-    conn = load_ssh_connection()
-    rsync_bin = _require_rsync()
-    remote_base = _remote_base_dir(conn)
-    remote_path = posixpath.join(remote_base, dir_name, entry_name)
-    local_path = TOGIKAIDRIVE_DEV_DIR / dir_name / entry_name
-    if not local_path.exists():
-        raise ValueError(f"ローカルに見つかりません: {local_path}")
-    host_spec = f"{conn.get('user') or 'pi'}@{conn['host']}"
-    # 送り先の親ディレクトリを先に作っておく(mkdir -p は固定コマンド+安全な引数のみ)
-    _run_ssh(conn, f"mkdir -p {shlex.quote(posixpath.join(remote_base, dir_name))}")
-    if is_dir:
-        src, dst = f"{local_path}/", f"{host_spec}:{remote_path}/"
-    else:
-        src, dst = str(local_path), f"{host_spec}:{remote_path}"
-    args = [rsync_bin, "-az", "-e", _rsync_ssh_option(conn), src, dst]
-    code, _out, err = _run_rsync(args)
-    if code != 0:
-        raise ValueError(f"送信に失敗しました: {err.decode('utf-8', 'replace').strip()}")
+    conn = remote_link.load_connection()
+    remote_link.audit_push(conn, TOGIKAIDRIVE_DEV_DIR, AUDIT_DIRS, dir_name, entry_name, is_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -1316,18 +1051,12 @@ def delete_template(raw_name: str) -> None:
 # ---------------------------------------------------------------------------
 # HTML
 # ---------------------------------------------------------------------------
-PALETTE = dict(
-    navy="#10131A", steel="#1F2A44", steel_soft="#3A4A6B", cyan="#00B4C6",
-    orange="#FF4B2B", white="#FFFFFF", card_bg="#F3F5FA", text_dark="#16192A",
-    muted="#6B7280", orange_tint="#FFEDE9", cyan_tint="#E4FAFC", steel_tint="#EAEEF6",
-)
-
-ACCENT_COLOR = {"cyan": PALETTE["cyan"], "orange": PALETTE["orange"], "steel": PALETTE["steel"]}
-ACCENT_TINT = {"cyan": PALETTE["cyan_tint"], "orange": PALETTE["orange_tint"], "steel": PALETTE["steel_tint"]}
-
-
-def _html_escape(text: str) -> str:
-    return html.escape(str(text), quote=True)
+# 色パレット・HTMLエスケープは3ツール共通のshared/ui_kit.pyに集約されている
+# (このファイルの先頭でインポート済み)。
+PALETTE = ui_kit.PALETTE
+ACCENT_COLOR = ui_kit.ACCENT_COLOR
+ACCENT_TINT = ui_kit.ACCENT_TINT
+_html_escape = ui_kit.html_escape
 
 
 def render_field(field: dict, value, plan_groups, meta: dict) -> str:
@@ -1805,7 +1534,8 @@ def render_remote_widget() -> str:
       </div>
       <p class="field-help">
         ラズパイのIPアドレス(または <code>raspberrypi.local</code> のようなホスト名)・ユーザー名・
-        ラズパイ上のconfig.pyの絶対パスを入力して保存してください。
+        ラズパイ上の <code>togikaidrive-dev</code> ディレクトリの絶対パスを入力して保存してください。
+        この接続設定は前処理ツール・学習実行ツールとも共有されます(<code>shared/ssh_connection.json</code>)。
         <b>パスワード認証は非対応です</b>(事前に <code>ssh-copy-id user@host</code> 等でこのMacの公開鍵を
         ラズパイに登録しておく必要があります)。秘密鍵パスは空欄なら<code>~/.ssh</code>の既定鍵を使います。
       </p>
@@ -1817,8 +1547,8 @@ def render_remote_widget() -> str:
         <input id="remote-port" type="number" style="flex:2;" value="{conn['port']}"></div>
       <div class="raw-row"><label style="flex:1;font-size:0.85rem;">SSH秘密鍵パス(任意)</label>
         <input id="remote-identity" type="text" placeholder="例: ~/.ssh/id_ed25519" style="flex:2;" value="{_html_escape(conn['identity_file'])}"></div>
-      <div class="raw-row"><label style="flex:1;font-size:0.85rem;">ラズパイ上のconfig.pyパス</label>
-        <input id="remote-config-path" type="text" placeholder="例: /home/pi/togikaidrive-dev/config.py" style="flex:2;" value="{_html_escape(conn['remote_config_path'])}"></div>
+      <div class="raw-row"><label style="flex:1;font-size:0.85rem;">ラズパイ上のtogikaidrive-devのパス</label>
+        <input id="remote-base-dir" type="text" placeholder="例: /home/pi/togikaidrive-dev" style="flex:2;" value="{_html_escape(conn['remote_base_dir'])}"></div>
       <div class="lock-buttons">
         <button type="button" onclick="remoteSaveConnection()">接続設定を保存</button>
         <button type="button" onclick="remoteTestConnection()">接続テスト</button>
@@ -1859,7 +1589,7 @@ def render_remote_widget() -> str:
           user: document.getElementById('remote-user').value,
           port: document.getElementById('remote-port').value,
           identity_file: document.getElementById('remote-identity').value,
-          remote_config_path: document.getElementById('remote-config-path').value,
+          remote_base_dir: document.getElementById('remote-base-dir').value,
         }};
       }}
 

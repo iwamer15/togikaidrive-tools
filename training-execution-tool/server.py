@@ -51,17 +51,21 @@ def _load_sibling_module(name: str, path: Path):
     return module
 
 
-# デザイン・config.py読み取り・データフォルダ一覧は、既存の2ツールをそのまま再利用する。
+# デザイン(PALETTE)・HTMLエスケープは3ツール共通のshared/ui_kit.pyを使う。
+# config.py読み取り・データフォルダ一覧は、既存の2ツールをそのまま再利用する。
 # config_editorを先に普通にimportしておくことで、data_tool内部の
 # `sys.path.insert(...); import server as config_editor` が同じモジュールを
 # 再利用できるようにする(sys.modules["server"]を先に埋めておく)。
+sys.path.insert(0, str(TOOLS_ROOT))
+from shared import ui_kit  # noqa: E402
+
 sys.path.insert(0, str(CONFIG_EDITOR_DIR))
 import server as config_editor  # noqa: E402
 
 data_tool = _load_sibling_module("togikaidrive_data_preprocessing_server", DATA_PREPROCESS_DIR / "server.py")
 
-PALETTE = config_editor.PALETTE
-_html_escape = config_editor._html_escape
+PALETTE = ui_kit.PALETTE
+_html_escape = ui_kit.html_escape
 
 TRAINING_KEYS = ["EPOCHS", "BATCH_SIZE", "HIDDEN_DIM", "NUM_HIDDEN_LAYERS", "MODEL_DIR"]
 
