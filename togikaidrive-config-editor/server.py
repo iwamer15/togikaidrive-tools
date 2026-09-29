@@ -28,6 +28,7 @@ import json
 import posixpath
 import re
 import shutil
+import signal
 import socket
 import sys
 import datetime
@@ -635,6 +636,12 @@ def init_motor() -> None:
     global HARDWARE_AVAILABLE, MOTOR_IMPORT_ERROR, motor_instance
     try:
         sys.path.insert(0, str(TOGIKAIDRIVE_DEV_DIR))
+        # run.pyのinitialize_system()と同じく、Motor()を作る前にデバイスを判別して
+        # I2Cバス番号を上書きする。config.pyの既定値(I2C_BUS=7)はJetson用のため、
+        # これをしないとラズパイでは/dev/i2c-7が無くて実機に繋がらない。
+        from device_detection import detect_device  # noqa: E402
+        import config as _dev_config  # noqa: E402  (motor.pyが参照するのと同じモジュール)
+        _dev_config.I2C_BUS = detect_device().i2c_bus
         import motor as motor_module  # noqa: E402  (togikaidrive-dev/motor.py)
         motor_instance = motor_module.Motor()
         HARDWARE_AVAILABLE = True
@@ -951,6 +958,28 @@ def audit_pull(dir_name: str, entry_name: str, is_dir: bool) -> None:
 def audit_push(dir_name: str, entry_name: str, is_dir: bool) -> None:
     conn = remote_link.load_connection()
     remote_link.audit_push(conn, TOGIKAIDRIVE_DEV_DIR, AUDIT_DIRS, dir_name, entry_name, is_dir)
+
+
+# 「ディレクトリを閲覧」(任意パスのツリーブラウザ)。上のAUDIT_DIRS監査と違い、
+# data/models以外のフォルダも辿れる。安全方針(--deleteなし、削除は一切しない、
+# ユーザーがボタンを押した時だけ転送)はremote_link.tree_pull/tree_push側で担保している。
+def browse_tree(side: str, rel_path: str) -> list:
+    conn = remote_link.load_connection()
+    if side == "local":
+        return remote_link.list_local_tree(TOGIKAIDRIVE_DEV_DIR, rel_path)
+    if side == "remote":
+        return remote_link.list_remote_tree(conn, conn.get("remote_base_dir", ""), rel_path)
+    raise ValueError(f"不明な対象です: {side}")
+
+
+def tree_pull(rel_path: str, is_dir: bool) -> None:
+    conn = remote_link.load_connection()
+    remote_link.tree_pull(conn, TOGIKAIDRIVE_DEV_DIR, conn.get("remote_base_dir", ""), rel_path, is_dir)
+
+
+def tree_push(rel_path: str, is_dir: bool) -> None:
+    conn = remote_link.load_connection()
+    remote_link.tree_push(conn, TOGIKAIDRIVE_DEV_DIR, conn.get("remote_base_dir", ""), rel_path, is_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -1588,6 +1617,20 @@ def render_remote_widget() -> str:
       </div>
       <div id="remote-audit-result"></div>
     </div>
+
+    <div class="motor-widget">
+      <div class="motor-widget-head"><h3>📂 ディレクトリを閲覧</h3></div>
+      <p class="field-help">
+        <code>data</code>/<code>models</code>以外も含め、togikaidrive-dev配下の任意のフォルダをローカル・
+        ラズパイ双方で比較できます。フォルダ名をクリックすると中に入れます。<b>削除は一切行いません</b>
+        (無い側に追加・更新するだけです)。
+      </p>
+      <div class="lock-buttons">
+        <button type="button" onclick="remoteTreeLoad()">読み込む</button>
+      </div>
+      <div id="remote-tree-breadcrumb" class="field-help" style="margin-top:0.6rem;"></div>
+      <div id="remote-tree-result"></div>
+    </div>
     <script>
       function remoteCollectConnection() {{
         return {{
@@ -1769,6 +1812,111 @@ def render_remote_widget() -> str:
           showToast('通信エラー: ' + e, true);
         }}
       }}
+
+      // ディレクトリを閲覧(任意パスのツリーブラウザ。上のdata/models監査とは別経路)。
+      let REMOTE_TREE_PATH = '';
+
+      function remoteTreeBreadcrumb(path) {{
+        const parts = path ? path.split('/') : [];
+        let html = `<span class="tree-crumb" onclick="remoteTreeGo('')">🏠 togikaidrive-dev/</span>`;
+        let acc = '';
+        parts.forEach(p => {{
+          acc = acc ? acc + '/' + p : p;
+          html += ` <span class="tree-crumb" onclick="remoteTreeGo('${{acc.replace(/'/g, "\\\\'")}}')">${{escapeHtml(p)}}/</span>`;
+        }});
+        return html;
+      }}
+
+      function remoteTreeGo(path) {{
+        REMOTE_TREE_PATH = path;
+        remoteTreeLoad();
+      }}
+
+      function remoteTreeMerge(localEntries, remoteEntries) {{
+        const byName = {{}};
+        localEntries.forEach(e => {{ (byName[e.name] = byName[e.name] || {{}}).local = e; }});
+        remoteEntries.forEach(e => {{ (byName[e.name] = byName[e.name] || {{}}).remote = e; }});
+        return Object.keys(byName).sort((a, b) => a.localeCompare(b)).map(name => {{
+          const local = byName[name].local, remote = byName[name].remote;
+          let status;
+          if (local && remote) {{
+            const same = local.type === remote.type &&
+              (local.type === 'dir' ? local.count === remote.count : local.size === remote.size);
+            status = same ? 'same' : 'differs';
+          }} else if (local) {{ status = 'local_only'; }} else {{ status = 'remote_only'; }}
+          return {{name, local, remote, status}};
+        }});
+      }}
+
+      function remoteTreeRow(row) {{
+        const local = row.local, remote = row.remote;
+        const isDir = (local && local.type === 'dir') || (remote && remote.type === 'dir');
+        const icon = isDir ? '📁' : '📄';
+        const entryPath = (REMOTE_TREE_PATH ? REMOTE_TREE_PATH + '/' : '') + row.name;
+        const safePath = entryPath.replace(/'/g, "\\\\'");
+        const nameHtml = isDir
+          ? `<a href="#" onclick="remoteTreeGo('${{safePath}}'); return false;">${{icon}} ${{escapeHtml(row.name)}}</a>`
+          : `${{icon}} ${{escapeHtml(row.name)}}`;
+        let actions = '';
+        if (row.status === 'local_only' || row.status === 'differs') {{
+          actions += `<button type="button" onclick="remoteTreeTransfer('push','${{safePath}}',${{isDir}})">→ ラズパイへpush</button>`;
+        }}
+        if (row.status === 'remote_only' || row.status === 'differs') {{
+          actions += `<button type="button" onclick="remoteTreeTransfer('pull','${{safePath}}',${{isDir}})">← ローカルへpull</button>`;
+        }}
+        const localLabel = local ? (local.type === 'dir' ? `📁(${{local.count}}件)` : remoteFormatSize(local.size)) : '-';
+        const remoteLabel = remote ? (remote.type === 'dir' ? `📁(${{remote.count}}件)` : remoteFormatSize(remote.size)) : '-';
+        return `<tr>
+          <td>${{nameHtml}}</td>
+          <td>${{localLabel}}</td>
+          <td>${{remoteLabel}}</td>
+          <td>${{REMOTE_AUDIT_STATUS_LABEL[row.status] || row.status}}</td>
+          <td class="audit-actions">${{actions}}</td>
+        </tr>`;
+      }}
+
+      async function remoteTreeLoad() {{
+        const box = document.getElementById('remote-tree-result');
+        document.getElementById('remote-tree-breadcrumb').innerHTML = remoteTreeBreadcrumb(REMOTE_TREE_PATH);
+        box.innerHTML = '<p class="field-help">読み込み中...</p>';
+        try {{
+          const [localRes, remoteRes] = await Promise.all([
+            fetch(`/remote/tree?side=local&path=${{encodeURIComponent(REMOTE_TREE_PATH)}}`),
+            fetch(`/remote/tree?side=remote&path=${{encodeURIComponent(REMOTE_TREE_PATH)}}`),
+          ]);
+          const localData = await localRes.json();
+          const remoteData = await remoteRes.json();
+          if (!localData.ok || !remoteData.ok) {{
+            box.innerHTML = `<p class="field-error">${{escapeHtml(remoteData.message || localData.message || '取得に失敗しました')}}</p>`;
+            return;
+          }}
+          const rows = remoteTreeMerge(localData.entries, remoteData.entries);
+          if (!rows.length) {{ box.innerHTML = '<p class="field-help">このフォルダは空です。</p>'; return; }}
+          box.innerHTML = `<table class="adv-table audit-table">
+              <tr><th>名前</th><th>ローカル</th><th>ラズパイ</th><th>状態</th><th>操作</th></tr>
+              ${{rows.map(remoteTreeRow).join('')}}
+            </table>`;
+        }} catch (e) {{
+          showToast('通信エラー: ' + e, true);
+        }}
+      }}
+
+      async function remoteTreeTransfer(direction, path, isDir) {{
+        const verb = direction === 'push' ? 'ラズパイへ送信' : 'ローカルへ取り込み';
+        if (!confirm(`「${{path}}」を${{verb}}します。よろしいですか?(既存ファイルの削除は行われません)`)) return;
+        try {{
+          const res = await fetch(`/remote/tree/${{direction}}`, {{
+            method: 'POST', headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{path: path, is_dir: isDir}}),
+          }});
+          const data = await res.json();
+          if (!data.ok) {{ showToast(data.message || '転送に失敗しました', true); return; }}
+          showToast(`${{path}} を${{verb}}しました`, false);
+          remoteTreeLoad();
+        }} catch (e) {{
+          showToast('通信エラー: ' + e, true);
+        }}
+      }}
     </script>'''
 
 
@@ -1847,7 +1995,18 @@ def render_code_log_panel(code_log: dict) -> str:
     return body
 
 
-def render_page() -> str:
+def render_page(extra_tabs: list[dict] | None = None, hide_ml_results_in_decision: bool = False) -> str:
+    """extra_tabs: ポータルがtraining-execution-tool/image-learning-toolの内容を
+    このタブバーに追加注入するための引数(togikaidrive-portal/server.pyの
+    `_config_editor_extra_tabs()`を参照)。各要素は
+    {"id", "icon", "title", "body_html", "css", "extra_body_html"} を持つ。
+    引数省略時(config-editorを単体で`python3 server.py`起動した場合)は
+    今まで通り何も変わらない。
+
+    hide_ml_results_in_decision: Trueの場合、「判断」タブに埋め込まれていた
+    学習結果表示(render_training_results_widget())を出さない。ポータル側で
+    「🧠 機械学習」タブに同じ内容を表示するため、1ページ内で二重表示になるのを防ぐ。
+    """
     snap, _ = get_snapshot()
     values = snap["values"]
     plan_groups = snap["plan_groups"]
@@ -1871,8 +2030,9 @@ def render_page() -> str:
         if cat["id"] == "control":
             fields_html = render_motor_calibration_widget() + fields_html
         if cat["id"] == "decision":
+            training_results_html = "" if hide_ml_results_in_decision else render_training_results_widget()
             fields_html = (render_planner_test_widget() + fields_html
-                           + render_training_results_widget() + render_yolo_test_widget())
+                           + training_results_html + render_yolo_test_widget())
         advanced_html = render_advanced_sections(advanced.get(cat["id"], []))
 
         panels += f'''
@@ -1912,6 +2072,20 @@ def render_page() -> str:
       </div>
     </section>'''
 
+    # 追加タブ(ポータルからのみ渡される。単体起動時はextra_tabs=Noneのため何も増えない):
+    # 他ツールの本文はそのツールの<style>を丸ごと持ち込むと:root/body等が衝突するため、
+    # ui_kit.scope_css()でこのタブのpanel-idにスコープ化してから追記する。
+    extra_tabs_css = ""
+    for tab in (extra_tabs or []):
+        tabs_nav += (f'<button class="tab-btn" data-tab="{tab["id"]}" '
+                     f'onclick="switchTab(\'{tab["id"]}\')">{tab["icon"]} {tab["title"]}</button>')
+        extra_tabs_css += ui_kit.scope_css(tab["css"], f'#panel-{tab["id"]}')
+        panels += f'''
+        <section class="tab-panel" id="panel-{tab["id"]}">
+          {tab["body_html"]}
+          {tab.get("extra_body_html", "")}
+        </section>'''
+
     field_meta_js = {key: dict(kind=f["kind"], **curated_meta[key])
                       for key, f in ((f["key"], f) for f in CURATED_FIELDS if f["kind"] != "diagram")
                       if curated_meta.get(key)}
@@ -1927,6 +2101,7 @@ def render_page() -> str:
         HTML_SHELL
         .replace("__TABS_NAV__", tabs_nav)
         .replace("__PANELS__", panels)
+        .replace("__EXTRA_TABS_CSS__", extra_tabs_css)
         .replace("__CONFIG_PATH__", str(CONFIG_PATH))
         .replace("__PLAN_INFO__", plan_info_json)
         .replace("__PLAN_FALLBACK__", plan_fallback_json)
@@ -2147,6 +2322,8 @@ HTML_SHELL = f'''<!doctype html>
     background: var(--steel); color: #fff; border: none; padding: 0.35rem 0.6rem; border-radius: 6px;
     font-size: 0.72rem; font-weight: 700; cursor: pointer; margin-right: 0.3rem; white-space: nowrap;
   }}
+  .tree-crumb {{ cursor: pointer; color: var(--cyan); font-weight: 700; }}
+  .tree-crumb:hover {{ text-decoration: underline; }}
 
   /* センサー配置図 */
   .car-diagram-wrap {{ display: flex; justify-content: center; padding: 0.4rem 0 0.2rem; }}
@@ -2226,6 +2403,7 @@ HTML_SHELL = f'''<!doctype html>
   }}
   #toast.show {{ transform: translateX(-50%) translateY(0); }}
   #toast.error {{ background: var(--orange); }}
+__EXTRA_TABS_CSS__
 </style>
 </head>
 <body>
@@ -2734,6 +2912,18 @@ def handle_get(handler, path: str) -> bool:
     if path == "/templates":
         handler._send_json(200, dict(ok=True, templates=list_templates()))
         return True
+    if path.startswith("/remote/tree"):
+        # このハンドラを呼ぶdo_GET()はdo_POST()と違って例外を捕まえないため、
+        # (接続未設定・SSH失敗等の)ValueErrorをここで捕まえてJSONエラーとして返す。
+        from urllib.parse import urlparse, parse_qs
+        qs = parse_qs(urlparse(path).query)
+        side = (qs.get("side") or ["local"])[0]
+        rel_path = (qs.get("path") or [""])[0]
+        try:
+            handler._send_json(200, dict(ok=True, entries=browse_tree(side, rel_path)))
+        except ValueError as e:
+            handler._send_json(400, dict(ok=False, message=str(e)))
+        return True
     return False
 
 
@@ -2857,6 +3047,16 @@ def handle_post(handler, path: str, posted: dict) -> bool:
         handler._send_json(200, dict(ok=True))
         return True
 
+    if path == "/remote/tree/pull":
+        tree_pull(posted.get("path", ""), bool(posted.get("is_dir")))
+        handler._send_json(200, dict(ok=True))
+        return True
+
+    if path == "/remote/tree/push":
+        tree_push(posted.get("path", ""), bool(posted.get("is_dir")))
+        handler._send_json(200, dict(ok=True))
+        return True
+
     return False
 
 
@@ -2896,15 +3096,32 @@ def local_ip() -> str:
         s.close()
 
 
+def _raise_keyboard_interrupt(_signum, _frame):
+    raise KeyboardInterrupt
+
+
 def main():
+    global PLANNER_IMPORT_ERROR, YOLO_IMPORT_ERROR
     if not CONFIG_PATH.exists():
         raise SystemExit(f"config.py が見つかりません: {CONFIG_PATH}")
+
+    # SIGTERMでもCtrl+C(KeyboardInterrupt)と同じ経路で終了させ、finallyの
+    # motor_instance.cleanup()(スロットル/ステアリングを0に戻す)を必ず実行する。
+    # PCA9685はプロセス終了後も最後のパルスを出し続けるため、これが無いと
+    # ポータルからの停止(SIGTERM)でスロットルが入ったまま車が走り続けるおそれがある。
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
 
     TEMPLATES_DIR.mkdir(exist_ok=True)
     get_snapshot(force=True)  # 起動時にキャッシュを作成しておく
     init_motor()
-    init_planner()
-    init_yolo()
+    if "--no-ml" in sys.argv:
+        # ラズパイ実機でモーター校正だけ使いたい時の軽量起動。torch等の重い
+        # ライブラリの読み込み(planner/YOLO)を省き、数秒で立ち上がるようにする。
+        PLANNER_IMPORT_ERROR = "--no-ml指定のため無効(軽量起動)"
+        YOLO_IMPORT_ERROR = "--no-ml指定のため無効(軽量起動)"
+    else:
+        init_planner()
+        init_yolo()
 
     with ThreadingHTTPServer(("0.0.0.0", PORT), Handler) as httpd:
         print("=" * 60)

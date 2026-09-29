@@ -3,20 +3,37 @@
 togikaidrive ポータル
 ======================
 設定エディタ(togikaidrive-config-editor)・前処理ツール(data-preprocessing-tool)・
-学習実行ツール(training-execution-tool)の3つを、1ポート/1プロセスでタブとして
+学習実行ツール(training-execution-tool)・画像学習パネル(image-learning-tool)・
+アノテーションツールランチャー(annotation-tool-launcher)を、1ポート/1プロセスで
 横断的に使えるようにするローカルツール。
 
+パネル構成(トップレベルタブ):
+    - 設定(config-editor) — この中に「🧠 機械学習」「📸 画像学習」が
+      サブタブとして埋め込まれる(training-execution-tool / image-learning-tool の
+      本文をconfig-editor自身のタブバーに追加注入する。詳細はrender_portal_page()を参照)。
+    - データ前処理(data-preprocessing-tool)
+    - ラズパイ実機(raspi-control-tool) — ラズパイ上の設定エディタ(実機のモーター校正等)を、
+      ツール配置・起動・停止までボタンで行う。ポータル自身はMac/Windowsで動くため
+      モーターは「モック」であり、実機に触れる操作はラズパイ上のプロセスが担う。
+    - アノテーションツール(annotation-tool-launcher) — 既存のPyQt5デスクトップアプリ
+      (annotation_training_d2j)を起動するボタンのみ。中身は書き直さない。
+
 設計方針:
-    - 3ツールのコード自体は(HTTPルーティングの薄いリファクタを除き)変更しない。
+    - 各ツールのコード自体は(HTTPルーティングの薄いリファクタを除き)変更しない。
       各ツールは今まで通りそれぞれ単体でも起動できる(`python3 server.py`)。
-      ポータルはそれに加わる第4の起動方法という位置づけ。
+      ポータルはそれに加わる追加の起動方法という位置づけ。
     - 各ツールの`render_page()`(スタンドアロン用フルページ)から、
       `shared/ui_kit.py`の`extract_panel()`でヘッダー・トースト要素・<main>タグを
       取り除いた「本文」だけを取り出し、1ページの中にタブパネルとして同居させる。
-      各パネルのCSSは`scope_css()`でパネルごとにスコープ化し(3ツールとも
+      各パネルのCSSは`scope_css()`でパネルごとにスコープ化し(各ツールとも
       `:root`/`body`/`header`/`main`を独自に再定義していたため、素朴に連結すると
       カスケードで衝突する)、パネル間で衝突しないようにしている。
-    - HTTPルーティング(`/save`・`/api/records`・`/train/start`等)は3ツールの間で
+    - training-execution-tool・image-learning-toolは「トップレベルタブ」としては
+      表示せず、config-editorの`render_page(extra_tabs=...)`引数経由でconfig-editor
+      自身のタブバーに追加注入する(ユーザー要望のパネルツリー: 設定パネルの下に
+      機械学習/画像学習パネルを置く構成に合わせるため)。ただし`handle_get`/
+      `handle_post`によるHTTPルーティングは他ツールと同様に`TOOLS`に含めて振り分ける。
+    - HTTPルーティング(`/save`・`/api/records`・`/train/start`等)は各ツールの間で
       パス名が重複していないことを確認済みのため、各ツールの`handle_get`/
       `handle_post`関数を順番に試すだけで正しく振り分けられる。
     - 追加のpipライブラリは使わない。
@@ -58,9 +75,18 @@ def _load_tool(module_name: str, dir_name: str):
 config_editor = _load_tool("togikaidrive_portal_config_editor", "togikaidrive-config-editor")
 data_tool = _load_tool("togikaidrive_portal_data_preprocessing", "data-preprocessing-tool")
 training_tool = _load_tool("togikaidrive_portal_training_execution", "training-execution-tool")
+image_learning_tool = _load_tool("togikaidrive_portal_image_learning", "image-learning-tool")
+annotation_launcher_tool = _load_tool("togikaidrive_portal_annotation_launcher", "annotation-tool-launcher")
+raspi_tool = _load_tool("togikaidrive_portal_raspi_control", "raspi-control-tool")
 
-# ポータルのタブ順(この順でタブが並ぶ)
-TOOLS = [config_editor, data_tool, training_tool]
+# HTTPルーティング(handle_get/handle_post)の振り分け対象。トップレベルタブとして
+# 表示するかどうか(PORTAL_TABS)とは独立している(training_tool/image_learning_toolは
+# config-editorに埋め込まれるだけでルーティングは自分自身で持つため、ここには残す)。
+TOOLS = [config_editor, data_tool, training_tool, image_learning_tool, annotation_launcher_tool, raspi_tool]
+
+# ポータルのトップレベルタブ順(この順でタブが並ぶ)。training_tool/image_learning_toolは
+# ここに含めない(config_editorのタブバーに注入されるため)。
+PORTAL_TABS = [config_editor, data_tool, raspi_tool, annotation_launcher_tool]
 
 # 各ツールのスタンドアロン起動時のmain()相当の初期化(モーター・判断ロジック・
 # YOLO検知の実機/ライブラリ有無チェック)。データ前処理・学習実行ツールは
@@ -101,19 +127,50 @@ function portalSwitchTab(id) {
 '''
 
 
+def _config_editor_extra_tabs() -> list[dict]:
+    """config-editorのタブバーに追加注入する「🧠 機械学習」「📸 画像学習」パネルを組み立てる。
+    training_tool/image_learning_toolの`render_page()`(スタンドアロン用フルページ)から
+    本文/CSSを抜き出し、機械学習パネルにはconfig-editor自身が持つ学習結果表示
+    (`render_training_results_widget()`、従来「判断」タブに埋め込まれていたもの)を
+    合わせて渡す(config-editor側で二重表示にならないよう、render_page()には
+    `hide_ml_results_in_decision=True`を渡して「判断」タブ側の表示を止めてもらう)。"""
+    ml_body, ml_css = ui_kit.extract_panel(training_tool.render_page())
+    il_body, il_css = ui_kit.extract_panel(image_learning_tool.render_page())
+    return [
+        # アイコン/タイトルはtraining_tool自身のPANEL_ICON/PANEL_TITLE("🚀 学習実行"、
+        # スタンドアロン起動時のタブ名)ではなく、ユーザー要望のパネルツリーに合わせて
+        # ここで「🧠 機械学習」に読み替える(実行+学習分析を1つにまとめたタブのため)。
+        dict(
+            id="ml_train", icon="🧠", title="機械学習",
+            body_html=ml_body, css=ml_css,
+            extra_body_html=config_editor.render_training_results_widget(),
+        ),
+        dict(
+            id="image_learning", icon=image_learning_tool.PANEL_ICON, title=image_learning_tool.PANEL_TITLE,
+            body_html=il_body, css=il_css, extra_body_html="",
+        ),
+    ]
+
+
 def render_portal_page() -> str:
     tabs_nav = ""
     panels = ""
     style_blocks = [ui_kit.BASE_CSS, PORTAL_CSS]
     script_blocks = [ui_kit.COMMON_JS, PORTAL_JS]
 
-    for i, tool in enumerate(TOOLS):
+    for i, tool in enumerate(PORTAL_TABS):
         active = "active" if i == 0 else ""
         tabs_nav += (
             f'<button class="portal-tab-btn {active}" data-portal-tab="{tool.PANEL_ID}" '
             f'onclick="portalSwitchTab(\'{tool.PANEL_ID}\')">{tool.PANEL_ICON} {tool.PANEL_TITLE}</button>'
         )
-        body, css = ui_kit.extract_panel(tool.render_page())
+        if tool is config_editor:
+            full_html = config_editor.render_page(
+                extra_tabs=_config_editor_extra_tabs(), hide_ml_results_in_decision=True,
+            )
+        else:
+            full_html = tool.render_page()
+        body, css = ui_kit.extract_panel(full_html)
         style_blocks.append(ui_kit.scope_css(css, f"#portal-panel-{tool.PANEL_ID}"))
         panels += f'<section class="portal-tab-panel {active}" id="portal-panel-{tool.PANEL_ID}">{body}</section>\n'
 
