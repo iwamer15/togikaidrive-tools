@@ -17,10 +17,12 @@ import tempfile
 import time
 from pathlib import Path
 
+from . import env_check
+
 HERE = Path(__file__).resolve().parent
 TOOLS_ROOT = HERE.parent  # lab/
 REPO_ROOT = TOOLS_ROOT.parent  # ト技会-minicar/ (togikaidrive-dev/ がある場所)
-ANNOTATION_TOOL_DIR = REPO_ROOT / "togikaidrive-dev" / "annotation_training_d2j"
+ANNOTATION_TOOL_DIR = env_check.resolve_togikaidrive_dev(REPO_ROOT) / "annotation_training_d2j"
 ANNOTATION_TOOL_MAIN = ANNOTATION_TOOL_DIR / "main.py"
 # Windowsには/tmpが無いので、OS標準の一時フォルダを使う
 ANNOTATION_TOOL_LOG = Path(tempfile.gettempdir()) / "togikai-annotation-tool.log"
@@ -129,6 +131,10 @@ def launch_annotation_tool() -> dict:
             tail = ANNOTATION_TOOL_LOG.read_text(encoding="utf-8", errors="replace")[-800:]
         except OSError:
             pass
+        hint = env_check.missing_module_hint(
+            tail, python_exe, ANNOTATION_TOOL_DIR / "requirements.txt")
+        if hint:
+            return dict(ok=False, message=hint)
         return dict(ok=False, message=f"起動直後に終了しました(終了コード{proc.returncode})。ログ: {tail.strip()[-400:]}")
 
     _LAUNCHED_PROC = proc

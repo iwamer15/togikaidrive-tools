@@ -23,11 +23,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from . import env_check
+
 HERE = Path(__file__).resolve().parent
 TOOLS_ROOT = HERE.parent  # lab/
 REPO_ROOT = TOOLS_ROOT.parent  # ト技会-minicar/ (togikaidrive-dev/ がある場所)
 DEFAULT_MLRUNS_DIR = (
-    REPO_ROOT / "togikaidrive-dev" / "annotation_training_d2j" / "mlruns"
+    env_check.resolve_togikaidrive_dev(REPO_ROOT) / "annotation_training_d2j" / "mlruns"
 )
 
 _SKIP_EXPERIMENT_DIRS = {".trash"}

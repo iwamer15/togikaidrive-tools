@@ -37,7 +37,6 @@ PORT = 8901
 HERE = Path(__file__).resolve().parent
 TOOLS_ROOT = HERE.parent  # lab/ (兄弟ツールとshared/がある場所)
 REPO_ROOT = TOOLS_ROOT.parent  # ト技会-minicar/ (togikaidrive-dev/ がある場所)
-TOGIKAIDRIVE_DEV_DIR = REPO_ROOT / "togikaidrive-dev"
 CONFIG_EDITOR_DIR = TOOLS_ROOT / "togikaidrive-config-editor"
 DATA_PREPROCESS_DIR = TOOLS_ROOT / "data-preprocessing-tool"
 
@@ -63,8 +62,10 @@ def _load_sibling_module(name: str, path: Path):
 # `sys.path.insert(...); import server as config_editor` が同じモジュールを
 # 再利用できるようにする(sys.modules["server"]を先に埋めておく)。
 sys.path.insert(0, str(TOOLS_ROOT))
-from shared import ui_kit  # noqa: E402
+from shared import env_check, ui_kit  # noqa: E402
 from shared.http_kit import JSONHandlerMixin  # noqa: E402
+
+TOGIKAIDRIVE_DEV_DIR = env_check.require_togikaidrive_dev(REPO_ROOT)
 
 sys.path.insert(0, str(CONFIG_EDITOR_DIR))
 import server as config_editor  # noqa: E402
@@ -89,6 +90,7 @@ TRAINING_STATE: dict = {
     "started_at": None,
     "finished_at": None,
     "error": None,
+    "python": None,
 }
 STATE_LOCK = threading.Lock()
 
@@ -114,6 +116,13 @@ def _read_output(proc: subprocess.Popen) -> None:
                 else:
                     TRAINING_STATE["status"] = "completed" if returncode == 0 else "failed"
                 TRAINING_STATE["finished_at"] = time.time()
+                if TRAINING_STATE["status"] == "failed":
+                    # ライブラリ(torch等)が入っていない時は、Pythonのエラー文だけだと
+                    # 何をすればよいか分からないので、入れ方を末尾に案内する
+                    hint = env_check.missing_module_hint(
+                        "\n".join(TRAINING_STATE["log"]), TRAINING_STATE["python"] or "python3")
+                    if hint:
+                        TRAINING_STATE["log"].extend(["", "[案内] " + hint])
 
 
 def start_training(folder: str, epochs, continue_training: bool) -> None:
@@ -134,8 +143,12 @@ def start_training(folder: str, epochs, continue_training: bool) -> None:
     ascending = sorted(folder_names)
     folder_number = ascending.index(folder) + 1
 
-    venv_python = TOGIKAIDRIVE_DEV_DIR / "venv" / "bin" / "python3"
-    python_exe = str(venv_python) if venv_python.exists() else sys.executable
+    python_exe = sys.executable
+    for rel in (("bin", "python3"), ("Scripts", "python.exe")):
+        venv_python = TOGIKAIDRIVE_DEV_DIR / "venv" / Path(*rel)
+        if venv_python.exists():
+            python_exe = str(venv_python)
+            break
 
     answers = []
     if len(folder_names) > 1:
@@ -161,7 +174,7 @@ def start_training(folder: str, epochs, continue_training: bool) -> None:
     with STATE_LOCK:
         TRAINING_STATE.update(
             status="running", log=[], proc=proc, folder=folder, epochs=epochs,
-            started_at=time.time(), finished_at=None, error=None,
+            started_at=time.time(), finished_at=None, error=None, python=python_exe,
         )
 
     try:

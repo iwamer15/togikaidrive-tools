@@ -36,11 +36,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 PORT = 8899
-# togikaidrive-config-editor/ と togikaidrive-dev/ は ト技会-minicar/ 直下の兄弟フォルダ
-# togikaidrive-config-editor/ は lab/ の中。togikaidrive-dev/ は lab/ の1つ上(リポジトリ直下)にある
+# togikaidrive-config-editor/ は lab/ の中。togikaidrive-dev/ の場所は
+# shared/env_check.py が探す(lab/の隣・ツールのフォルダの隣・環境変数のどれでも可)
 TOOLS_ROOT = Path(__file__).resolve().parent.parent  # lab/ (兄弟ツールとshared/がある場所)
 REPO_ROOT = TOOLS_ROOT.parent
-CONFIG_PATH = REPO_ROOT / "togikaidrive-dev" / "config.py"
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
 # ポータル(togikaidrive-portal)がタブとして埋め込む際に使うメタ情報
@@ -51,8 +50,11 @@ PANEL_ICON = "🔧"
 # 色パレット・HTMLエスケープ・SSH/ラズパイ連携は3ツール共通のshared/配下のモジュール
 # (このファイル固有のドメイン知識を持たない)を使う。
 sys.path.insert(0, str(TOOLS_ROOT))
-from shared import remote_link, ui_kit  # noqa: E402
+from shared import env_check, remote_link, ui_kit  # noqa: E402
 from shared.http_kit import JSONHandlerMixin  # noqa: E402
+
+# togikaidrive-devが無い場合は、置き場所を案内して終了する(Pythonのエラー文を出さない)
+CONFIG_PATH = env_check.require_togikaidrive_dev(REPO_ROOT) / "config.py"
 
 # ---------------------------------------------------------------------------
 # ミニカー処理カテゴリ(6分類)
