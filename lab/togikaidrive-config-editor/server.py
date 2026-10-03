@@ -37,8 +37,10 @@ from pathlib import Path
 
 PORT = 8899
 # togikaidrive-config-editor/ と togikaidrive-dev/ は ト技会-minicar/ 直下の兄弟フォルダ
-TOOLS_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = TOOLS_ROOT / "togikaidrive-dev" / "config.py"
+# togikaidrive-config-editor/ は lab/ の中。togikaidrive-dev/ は lab/ の1つ上(リポジトリ直下)にある
+TOOLS_ROOT = Path(__file__).resolve().parent.parent  # lab/ (兄弟ツールとshared/がある場所)
+REPO_ROOT = TOOLS_ROOT.parent
+CONFIG_PATH = REPO_ROOT / "togikaidrive-dev" / "config.py"
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
 # ポータル(togikaidrive-portal)がタブとして埋め込む際に使うメタ情報
@@ -628,6 +630,9 @@ class MockMotor:
 
 HARDWARE_AVAILABLE = False
 MOTOR_IMPORT_ERROR = ""
+# "local": 手元のPCで動かす通常の設定エディタ / "raspi": ラズパイ上の実機制御エディタ
+# (lab/raspi-editor が起動時に設定する)。見た目の区別にだけ使い、機能は変えない。
+UI_MODE = "local"
 motor_instance = None
 MOTOR_RAW_PWM_RANGE = (100, 600)
 
@@ -1995,6 +2000,31 @@ def render_code_log_panel(code_log: dict) -> str:
     return body
 
 
+def _mode_labels() -> dict:
+    """画面を見ただけで「実機に繋がっているのか、モックなのか」が分かるよう、
+    モーターの実際の状態(HARDWARE_AVAILABLE)から帯・見出し・タイトルを決める。
+    実機のモーターに繋がっているなら、どこから起動しても(UI_MODEに関係なく)赤で表示する。
+    ポータルとラズパイ上のエディタは中身がほぼ同じ画面のため、取り違えると
+    「モックのつもりで実機を動かす/実機のつもりでモックだった」が起きる。"""
+    if HARDWARE_AVAILABLE:
+        return dict(
+            header_class="mode-real", title="🍓 実機制御エディタ(実機接続中)",
+            eyebrow="TOGIKAIDRIVE · RASPBERRY PI · 実機制御", h1="🍓 実機制御エディタ",
+            banner='<div class="mode-banner real">🍓 実機モード — この画面の操作は<b>実際の車(モーター・サーボ)に届きます</b>。'
+                   'タイヤを浮かせ、すぐ止められる状態で操作してください。</div>')
+    if UI_MODE == "raspi":
+        return dict(
+            header_class="mode-warn", title="⚠️ 実機制御エディタ(実機に未接続)",
+            eyebrow="TOGIKAIDRIVE · RASPBERRY PI · 実機制御", h1="⚠️ 実機制御エディタ(未接続)",
+            banner='<div class="mode-banner warn">⚠️ 実機制御用として起動しましたが、<b>モーターに接続できていません(モック動作)</b>。'
+                   '操作しても車は動きません。ログの「実機のMotorを初期化できなかった」の理由を確認してください。</div>')
+    return dict(
+        header_class="mode-local", title="togikaidrive 設定エディタ",
+        eyebrow="TOGIKAIDRIVE · CONFIG EDITOR", h1="設定エディタ",
+        banner='<div class="mode-banner local">💻 このPC上の画面です — モーターは<b>モック(シミュレーション)</b>で、実機は動きません。'
+               '車を動かすには「🍓 ラズパイ実機」タブから実機制御エディタを開いてください。</div>')
+
+
 def render_page(extra_tabs: list[dict] | None = None, hide_ml_results_in_decision: bool = False) -> str:
     """extra_tabs: ポータルがtraining-execution-tool/image-learning-toolの内容を
     このタブバーに追加注入するための引数(togikaidrive-portal/server.pyの
@@ -2013,6 +2043,7 @@ def render_page(extra_tabs: list[dict] | None = None, hide_ml_results_in_decisio
     curated_meta = snap["curated_meta"]
     advanced = snap["advanced"]
     code_log = snap["code_log"]
+    mode = _mode_labels()
 
     tabs_nav = ""
     panels = ""
@@ -2102,6 +2133,11 @@ def render_page(extra_tabs: list[dict] | None = None, hide_ml_results_in_decisio
         .replace("__TABS_NAV__", tabs_nav)
         .replace("__PANELS__", panels)
         .replace("__EXTRA_TABS_CSS__", extra_tabs_css)
+        .replace("__PAGE_TITLE__", mode["title"])
+        .replace("__HEADER_CLASS__", mode["header_class"])
+        .replace("__EYEBROW__", mode["eyebrow"])
+        .replace("__H1__", mode["h1"])
+        .replace("__MODE_BANNER__", mode["banner"])
         .replace("__CONFIG_PATH__", str(CONFIG_PATH))
         .replace("__PLAN_INFO__", plan_info_json)
         .replace("__PLAN_FALLBACK__", plan_fallback_json)
@@ -2115,7 +2151,7 @@ HTML_SHELL = f'''<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>togikaidrive 設定エディタ</title>
+<title>__PAGE_TITLE__</title>
 <style>
   :root {{
     --navy: {PALETTE["navy"]}; --steel: {PALETTE["steel"]}; --steel-soft: {PALETTE["steel_soft"]};
@@ -2322,6 +2358,12 @@ HTML_SHELL = f'''<!doctype html>
     background: var(--steel); color: #fff; border: none; padding: 0.35rem 0.6rem; border-radius: 6px;
     font-size: 0.72rem; font-weight: 700; cursor: pointer; margin-right: 0.3rem; white-space: nowrap;
   }}
+  header.mode-real {{ background: #5C0A14; }}
+  header.mode-warn {{ background: #5A4A00; }}
+  .mode-banner {{ padding: 0.7rem 1.5rem; font-size: 0.85rem; line-height: 1.6; }}
+  .mode-banner.real {{ background: #B00020; color: #fff; font-weight: 600; }}
+  .mode-banner.warn {{ background: #FFF3CD; color: #8A6D00; font-weight: 600; }}
+  .mode-banner.local {{ background: #EAEEF6; color: var(--steel); }}
   .tree-crumb {{ cursor: pointer; color: var(--cyan); font-weight: 700; }}
   .tree-crumb:hover {{ text-decoration: underline; }}
 
@@ -2407,11 +2449,11 @@ __EXTRA_TABS_CSS__
 </style>
 </head>
 <body>
-<header>
+<header class="__HEADER_CLASS__">
   <div class="header-top">
     <div>
-      <div class="eyebrow">TOGIKAIDRIVE · CONFIG EDITOR</div>
-      <h1>設定エディタ</h1>
+      <div class="eyebrow">__EYEBROW__</div>
+      <h1>__H1__</h1>
       <p>config.py 全480項目を、ミニカーの処理カテゴリ別にまとめて安全に編集します。</p>
     </div>
     <div class="header-actions">
@@ -2427,6 +2469,7 @@ __EXTRA_TABS_CSS__
     <div id="templates-list"></div>
   </div>
 </header>
+__MODE_BANNER__
 <nav class="tabs-nav">__TABS_NAV__</nav>
 <div id="toast"></div>
 <main>

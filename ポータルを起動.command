@@ -1,10 +1,10 @@
 #!/bin/bash
 # togikaidrive ポータルをダブルクリックで起動するためのスクリプト(Mac用)。
-# 1. このファイルと同じ場所にある togikaidrive-portal/server.py を起動する
+# 1. このファイルと同じ場所にある lab/togikaidrive-portal/server.py を起動する
 # 2. サーバーが立ち上がるのを少し待ってからブラウザを自動で開く
 # 終了するにはこのターミナルのウィンドウで Ctrl+C を押すか、ウィンドウを閉じる。
-cd "$(dirname "$0")/togikaidrive-portal" || {
-  echo "エラー: togikaidrive-portal フォルダが見つかりません。"
+cd "$(dirname "$0")/lab/togikaidrive-portal" || {
+  echo "エラー: lab/togikaidrive-portal フォルダが見つかりません。"
   echo "このファイルを ト技会-minicar フォルダの直下に置いたまま実行してください。"
   read -r -p "Enterキーで閉じます..."
   exit 1

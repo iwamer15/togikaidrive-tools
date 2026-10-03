@@ -12,8 +12,8 @@
     SSH接続設定(shared/ssh_connection.json)を使い、ブラウザのボタンだけで済ませる。
 
 やること:
-    1. ツールを配置/更新: shared/ と togikaidrive-config-editor/ をラズパイの
-       togikaidrive-dev と同じ階層へ送る(rsync不要。Windowsでもsshだけで動く)
+    1. ツールを配置/更新: shared/・togikaidrive-config-editor/・raspi-editor/ を
+       ラズパイの <togikaidrive-devの親>/lab/ へ送る(rsync不要。Windowsでもsshだけで動く)
     2. 実機制御(設定エディタ)を起動/停止: ラズパイ上で軽量モード(--no-ml)で起動する。
        sshを切っても動き続け、停止時はSIGTERM→設定エディタ側でモーターを0に戻してから終了する
     3. モーター停止: 起動中の設定エディタにスロットル/ステアリング0を送る
@@ -35,7 +35,8 @@ from pathlib import Path
 
 PORT = 8904
 HERE = Path(__file__).resolve().parent
-TOOLS_ROOT = HERE.parent  # ト技会-minicar/ (togikaidrive-tools リポジトリ直下)
+TOOLS_ROOT = HERE.parent  # lab/ (兄弟ツールとshared/がある場所)
+REPO_ROOT = TOOLS_ROOT.parent  # ト技会-minicar/ (togikaidrive-dev/ がある場所)
 
 # ポータル(togikaidrive-portal)がタブとして埋め込む際に使うメタ情報
 PANEL_ID = "raspi"
@@ -51,7 +52,7 @@ PALETTE = ui_kit.PALETTE
 
 EDITOR_PORT = 8899                      # ラズパイ上の設定エディタのポート
 DAEMON_NAME = "config-editor"           # /tmp/togikai-config-editor.pid|log
-DEPLOY_DIRS = ["shared", "togikaidrive-config-editor"]
+DEPLOY_DIRS = ["shared", "togikaidrive-config-editor", "raspi-editor"]
 # ssh_connection.jsonは各PC固有の接続情報、templatesは各自の保存済みテンプレートなので送らない
 DEPLOY_EXCLUDE = {"ssh_connection.json", "templates"}
 
@@ -69,13 +70,14 @@ def _connection() -> dict:
 
 
 def _layout(conn: dict) -> dict:
-    """ツールは、ラズパイ上のtogikaidrive-devと同じ階層(その親ディレクトリ)に置く。
-    設定エディタはTOOLS_ROOT/togikaidrive-dev/config.py を編集する作りのため。"""
+    """PC側と同じく、ツールはlab/の中に置き、そのlab/をラズパイ上のtogikaidrive-devの
+    親ディレクトリ直下に作る(設定エディタはlab/の1つ上のtogikaidrive-dev/config.pyを編集する作りのため)。
+    起動するのは実機制御用の入口であるlab/raspi-editor/。"""
     base = conn["remote_base_dir"].rstrip("/")
-    parent = posixpath.dirname(base)
+    lab = posixpath.join(posixpath.dirname(base), "lab")
     return dict(
-        parent=parent,
-        workdir=posixpath.join(parent, "togikaidrive-config-editor"),
+        lab=lab,
+        workdir=posixpath.join(lab, "raspi-editor"),
         python=posixpath.join(base, "venv", "bin", "python3"),
     )
 
@@ -110,8 +112,8 @@ def deploy() -> dict:
     conn = _connection()
     layout = _layout(conn)
     count = remote_link.push_directories_tar(
-        conn, TOOLS_ROOT, DEPLOY_DIRS, layout["parent"], exclude_names=DEPLOY_EXCLUDE)
-    return dict(files=count, destination=layout["parent"])
+        conn, TOOLS_ROOT, DEPLOY_DIRS, layout["lab"], exclude_names=DEPLOY_EXCLUDE)
+    return dict(files=count, destination=layout["lab"])
 
 
 def start_editor() -> dict:
@@ -263,13 +265,13 @@ __ROOT_CSS__
 
   <div class="card">
     <h2>① ツールを配置 / 更新</h2>
-    <p class="sub">設定エディタ一式をラズパイへ送ります(初回と、ツールを更新した時に実行)。ラズパイ側にしか無いファイルは消しません。更新後に起動中の場合は、一度停止して起動し直してください。</p>
+    <p class="sub">実機制御エディタ一式(shared・設定エディタ・raspi-editor)をラズパイの<code>lab/</code>へ送ります(初回と、ツールを更新した時に実行)。ラズパイ側にしか無いファイルは消しません。更新後に起動中の場合は、一度停止して起動し直してください。</p>
     <button class="raspi-primary" id="raspi-deploy-btn" onclick="raspiDeploy()">ツールを配置 / 更新</button>
   </div>
 
   <div class="card">
-    <h2>② 実機制御(設定エディタ)を起動</h2>
-    <p class="sub">ラズパイ上で軽量モードで起動します。起動には数秒かかります。「開く」から「操作」タブ → 「🔧 モーター校正」を使ってください(バッジが「🟢 実機接続中」なら実機に届きます)。</p>
+    <h2>② 実機制御エディタを起動</h2>
+    <p class="sub">ラズパイ上で軽量モードで起動します。起動には数秒かかります。「開く」で別タブに開く<b>実機制御エディタ</b>の「操作」タブ → 「🔧 モーター校正」を使ってください。<b>赤いヘッダーと赤い帯(🍓 実機モード)の画面が実機に届く画面</b>です。このポータル(紺のヘッダー)の画面は、モーターがモックなので車は動きません。</p>
     <p>状態: <span id="raspi-badge" class="raspi-badge idle">未確認</span></p>
     <div class="raspi-btn-row">
       <button class="raspi-primary" id="raspi-start-btn" onclick="raspiStart()">起動</button>

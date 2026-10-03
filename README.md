@@ -8,7 +8,9 @@
 
 すべて**Pythonの標準ライブラリだけ**で動く小さなWebサーバーです(`pip install`は不要)。各ツールは単体でも起動できますが、`togikaidrive-portal`から1つの画面としてまとめて使うのがおすすめです。
 
-| ツール | 役割 | 単体起動時のURL |
+ツールはすべて`lab/`の中にあります(`togikaidrive-dev/`は車本体のコードで、`lab/`の外・リポジトリ直下にあります)。
+
+| ツール(`lab/`の中) | 役割 | 単体起動時のURL |
 |---|---|---|
 | `togikaidrive-portal` | 他の全ツールを1画面にまとめる入り口 | http://localhost:8898 |
 | `togikaidrive-config-editor` | `config.py`(設定ファイル)の編集、ラズパイとの同期、モーター校正 | http://localhost:8899 |
@@ -16,9 +18,18 @@
 | `training-execution-tool` | 測距センサーモデル(nn)の学習実行・進捗表示 | http://localhost:8901 |
 | `annotation-tool-launcher` | 画像アノテーションツール(別の大きなデスクトップアプリ)の起動ボタン | http://localhost:8902 |
 | `image-learning-tool` | 画像学習(Google Colab)の導線・学習結果(MLflow)の分析 | http://localhost:8903 |
-| `raspi-control-tool` | ラズパイへのツール配置・実機用エディタの起動停止・モーター緊急停止 | http://localhost:8904 |
+| `raspi-control-tool` | ラズパイへのツール配置・実機制御エディタの起動停止・モーター緊急停止 | http://localhost:8904 |
+| `raspi-editor` | **ラズパイ上で動く**実機制御エディタの入口(普通は手動起動せず、上のraspi-control-toolから使う) | ラズパイの http://\<IP\>:8899 |
 
 `shared/`は上記ツール共通の部品(SSH連携・画面デザイン)で、単体では起動しません。
+
+### PC上の画面と実機制御の画面の見分け方
+
+ポータルの設定エディタと、ラズパイ上の実機制御エディタは中身が同じなので画面がよく似ています。取り違えないよう次のように表示が違います。
+
+- **紺のヘッダー + 灰色の帯「💻 このPC上の画面です」** → PC上の画面。モーターはモックで、**車は動きません**。
+- **赤いヘッダー + 赤い帯「🍓 実機モード」** → ラズパイ上の実機制御エディタ。**操作は実際の車に届きます**。
+- 黄色い帯「⚠️ モーターに接続できていません」 → 実機制御として起動したが実機に繋がっていない(車は動きません)。
 
 ---
 
@@ -76,7 +87,7 @@ ssh pi@<ラズパイのIPまたはホスト名> echo OK
 (ターミナルで手動起動したい場合は以下でも同じです)
 
 ```bash
-cd togikaidrive-tools/togikaidrive-portal
+cd togikaidrive-tools/lab/togikaidrive-portal
 python3 server.py
 ```
 
@@ -92,7 +103,7 @@ python3 server.py
 | SSH秘密鍵パス | 空欄でOK(手順3で`~/.ssh`に作った既定の鍵を使う) |
 | ラズパイ上のtogikaidrive-devのパス | `/home/pi/togikaidrive-dev` |
 
-「接続OK」と出れば成功です。この設定は自分のPC内だけに保存され(`shared/ssh_connection.json`)、他のメンバーとは共有されません。**メンバーそれぞれが自分のPCでこの手順を行う必要があります。**
+「接続OK」と出れば成功です。この設定は自分のPC内だけに保存され(`lab/shared/ssh_connection.json`)、他のメンバーとは共有されません。**メンバーそれぞれが自分のPCでこの手順を行う必要があります。**
 
 ### 6. 実機(モーター)を確認する
 
@@ -122,7 +133,7 @@ GitHubからダウンロードしたファイルにmacOSが警告を出してい
 macOSの「ローカルネットワーク」アクセスをChromeに許可していないことが原因です。「システム設定 → プライバシーとセキュリティ → ローカルネットワーク」でGoogle Chromeをオンにし、Chromeを再起動してください。急ぎの場合はSafariで開くか、ホスト名の代わりにIPアドレス(例: `192.168.1.23:8899`)を使ってください。
 
 **`python3 server.py` が「ファイルが見つかりません」等で起動しない**
-それぞれのツールは、そのツール自身のフォルダの中で実行する前提です(`cd togikaidrive-portal && python3 server.py` のように、必ずそのフォルダに移動してから実行してください)。
+それぞれのツールは、そのツール自身のフォルダの中で実行する前提です(`cd lab/togikaidrive-portal && python3 server.py` のように、必ずそのフォルダに移動してから実行してください)。
 
 **ラズパイでnanoでconfig.pyを開いたのに中身が空**
 ホームディレクトリ(`~`)で`nano config.py`を実行すると、そこには無いので新規の空ファイルとして開かれます。`cd togikaidrive-dev && nano config.py`のように移動してから開いてください。

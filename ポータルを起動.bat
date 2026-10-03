@@ -1,18 +1,23 @@
 @echo off
-REM togikaidrive ポータルをダブルクリックで起動するためのスクリプト(Windows用)。
-REM 1. このファイルと同じ場所にある togikaidrive-portal\server.py を起動する
-REM 2. サーバーが立ち上がるのを少し待ってからブラウザを自動で開く
-REM 終了するにはこのウィンドウで Ctrl+C を押すか、ウィンドウを閉じる。
+REM Double-click launcher for the togikaidrive portal (Windows).
+REM Starts lab\togikaidrive-portal\server.py and opens the browser.
+REM Stop: press Ctrl+C in this window, or close it.
+REM NOTE: keep this file ASCII-only with CRLF line endings. Japanese text here can
+REM       break cmd.exe on Japanese Windows (code page 932).
 
-cd /d "%~dp0togikaidrive-portal"
+chcp 65001 >nul
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
+
+cd /d "%~dp0lab\togikaidrive-portal"
 if not exist server.py (
-  echo エラー: togikaidrive-portal フォルダが見つかりません。
-  echo このファイルを ト技会-minicar フォルダの直下に置いたまま実行してください。
+  echo ERROR: lab\togikaidrive-portal folder not found.
+  echo Keep this file in the top folder of togikaidrive-tools.
   pause
   exit /b 1
 )
 
-echo togikaidrive ポータルを起動しています...
+echo Starting togikaidrive portal... http://localhost:8898
 start "" /b cmd /c "timeout /t 2 /nobreak >nul & start http://localhost:8898"
 
 where python >nul 2>nul
@@ -31,8 +36,8 @@ if %errorlevel%==0 (
   goto :done
 )
 
-echo エラー: Pythonが見つかりません。Python 3 をインストールしてから、もう一度実行してください。
-echo (インストール時に「Add python.exe to PATH」にチェックを入れてください)
+echo ERROR: Python was not found. Install Python 3 from https://www.python.org/downloads/
+echo        and check "Add python.exe to PATH" in the installer, then run this file again.
 
 :done
 echo.

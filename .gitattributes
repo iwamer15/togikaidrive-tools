@@ -1,0 +1,5 @@
+# 起動スクリプトは改行コードを変換せず、書いたバイト列のまま保存する(-text)。
+# .bat はCRLF必須(LFだとWindowsのcmd.exeがgoto/ラベルを誤認することがある)、.command はLF。
+# GitHubのZIPダウンロード・git clone のどちらでも同じ改行コードで届く。
+*.bat -text
+*.command -text

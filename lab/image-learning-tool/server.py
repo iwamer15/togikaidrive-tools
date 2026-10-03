@@ -28,7 +28,8 @@ from urllib.parse import urlparse, parse_qs
 
 PORT = 8903
 HERE = Path(__file__).resolve().parent
-TOOLS_ROOT = HERE.parent  # ト技会-minicar/ (togikaidrive-tools リポジトリ直下)
+TOOLS_ROOT = HERE.parent  # lab/ (兄弟ツールとshared/がある場所)
+REPO_ROOT = TOOLS_ROOT.parent  # ト技会-minicar/ (togikaidrive-dev/ がある場所)
 
 # ポータル(togikaidrive-portal)がconfig-editorへ埋め込む際に使うメタ情報
 PANEL_ID = "image_learning"

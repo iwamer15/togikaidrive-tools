@@ -15,7 +15,7 @@
 ## 使い方
 
 ```bash
-cd ト技会-minicar/data-preprocessing-tool
+cd ト技会-minicar/lab/data-preprocessing-tool
 python3 server.py
 ```
 
@@ -45,7 +45,7 @@ cp catalog_0.catalog.bak.20260908_015200 catalog_0.catalog
 
 ## 設計上の重要な注意(なぜmanifest.jsonの`deleted_indexes`を使わないか)
 
-DonkeyCar形式の`manifest.json`には、削除済み行のインデックスを記録する`deleted_indexes`という仕組みがある。しかし`train_pytorch.py`の`load_donkeycar_data()`を読むと、この判定は**catalogファイルごとに0から数え直した位置**に対して行われており([train_pytorch.py:169-179](../togikaidrive-dev/train_pytorch.py))、複数のcatalogファイルにまたがるデータでは「削除したい行と同じ相対位置の、他のcatalogファイルの行」まで意図せず削除扱いになってしまう。1ファイル最大1000レコードで自動分割される実際の収集データでは複数ファイルに分かれるケースが多いため、この仕組みは使わず、**対象のcatalogファイルを直接安全に書き換える**方式にしている(講座で教えている手動編集と同じ結果になる、より確実な方法)。`train_pytorch.py`自体は変更しない。
+DonkeyCar形式の`manifest.json`には、削除済み行のインデックスを記録する`deleted_indexes`という仕組みがある。しかし`train_pytorch.py`の`load_donkeycar_data()`を読むと、この判定は**catalogファイルごとに0から数え直した位置**に対して行われており([train_pytorch.py:169-179](../../togikaidrive-dev/train_pytorch.py))、複数のcatalogファイルにまたがるデータでは「削除したい行と同じ相対位置の、他のcatalogファイルの行」まで意図せず削除扱いになってしまう。1ファイル最大1000レコードで自動分割される実際の収集データでは複数ファイルに分かれるケースが多いため、この仕組みは使わず、**対象のcatalogファイルを直接安全に書き換える**方式にしている(講座で教えている手動編集と同じ結果になる、より確実な方法)。`train_pytorch.py`自体は変更しない。
 
 ## 制約
 

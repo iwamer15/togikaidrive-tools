@@ -37,8 +37,9 @@ from pathlib import Path
 
 PORT = 8900
 HERE = Path(__file__).resolve().parent
-TOOLS_ROOT = HERE.parent  # ト技会-minicar/ (togikaidrive-tools リポジトリ直下)
-TOGIKAIDRIVE_DEV_DIR = TOOLS_ROOT / "togikaidrive-dev"
+TOOLS_ROOT = HERE.parent  # lab/ (兄弟ツールとshared/がある場所)
+REPO_ROOT = TOOLS_ROOT.parent  # ト技会-minicar/ (togikaidrive-dev/ がある場所)
+TOGIKAIDRIVE_DEV_DIR = REPO_ROOT / "togikaidrive-dev"
 DATA_DIR = TOGIKAIDRIVE_DEV_DIR / "data"
 
 # ポータル(togikaidrive-portal)がタブとして埋め込む際に使うメタ情報

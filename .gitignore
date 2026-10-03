@@ -13,7 +13,7 @@ togikaidrive-devのコピー/
 *.pdf
 
 # togikaidrive-config-editorが実行時に作るテンプレート保存先
-togikaidrive-config-editor/templates/
+lab/togikaidrive-config-editor/templates/
 
 # 3ツール共通のSSH接続設定(ホスト名・ユーザー名など環境固有情報)
-shared/ssh_connection.json
+lab/shared/ssh_connection.json

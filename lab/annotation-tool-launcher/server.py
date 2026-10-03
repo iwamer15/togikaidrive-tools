@@ -25,7 +25,8 @@ from pathlib import Path
 
 PORT = 8902
 HERE = Path(__file__).resolve().parent
-TOOLS_ROOT = HERE.parent  # ト技会-minicar/ (togikaidrive-tools リポジトリ直下)
+TOOLS_ROOT = HERE.parent  # lab/ (兄弟ツールとshared/がある場所)
+REPO_ROOT = TOOLS_ROOT.parent  # ト技会-minicar/ (togikaidrive-dev/ がある場所)
 
 # ポータル(togikaidrive-portal)がタブとして埋め込む際に使うメタ情報
 PANEL_ID = "annotation_launcher"

@@ -11,7 +11,7 @@
 ## 使い方
 
 ```bash
-cd ト技会-minicar/annotation-tool-launcher
+cd ト技会-minicar/lab/annotation-tool-launcher
 python3 server.py
 ```
 
@@ -26,3 +26,9 @@ python3 server.py
 
 - annotation_training_d2j専用の`venv`(`annotation_training_d2j/venv/bin/python3`)があればそれを使って起動し、無ければこのツールを実行しているPythonにフォールバックする。
 - プロセスの起動有無はこのサーバー自身が起動したものだけを把握する(サーバーを再起動すると追跡状態はリセットされる)。
+- 起動直後(3秒以内)にプロセスが終了した場合は失敗として扱い、ログ(OSの一時フォルダの`togikai-annotation-tool.log`。Macは`/tmp/`、Windowsは`%TEMP%`)の末尾をエラーメッセージに含めて返す。「起動しました」と表示されたのに実際は開いていない、という状態を防ぐため。
+
+## 既知の問題と対処
+
+**macOSで「起動しました」の直後にウィンドウが開かない場合**
+venv内のPyQt5がmacOS用の描画プラグイン(cocoa)を自力で見つけられず、`qt.qpa.plugin: Could not find the Qt platform plugin "cocoa"`というエラーで即終了することがある(実際に発生を確認済み)。`shared/app_launcher.py`の`_qt_plugin_env()`が、venv内にバンドルされているプラグインディレクトリ(`venv/lib/python3.*/site-packages/PyQt5/Qt5/plugins/platforms`)を自動検出して`QT_QPA_PLATFORM_PLUGIN_PATH`に設定することで対処済み。それでも起動に失敗する場合は、エラーメッセージに含まれるログの内容を確認すること。

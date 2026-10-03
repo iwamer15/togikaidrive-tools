@@ -11,7 +11,7 @@
 ## 使い方
 
 ```bash
-cd ト技会-minicar/training-execution-tool
+cd ト技会-minicar/lab/training-execution-tool
 python3 server.py
 ```
 

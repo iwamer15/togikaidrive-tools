@@ -11,7 +11,7 @@
 ## 使い方
 
 ```bash
-cd ト技会-minicar/togikaidrive-config-editor
+cd ト技会-minicar/lab/togikaidrive-config-editor
 python3 server.py
 ```
 
@@ -20,7 +20,7 @@ python3 server.py
 モーター校正ウィジェットで実機を動かしたい場合(ラズパイ上)は、システムの`python3`ではなく`Adafruit_PCA9685`が入っている`togikaidrive-dev/venv`のPythonで起動する。
 
 ```bash
-cd ト技会-minicar/togikaidrive-config-editor
+cd ト技会-minicar/lab/togikaidrive-config-editor
 /home/pi/togikaidrive-dev/venv/bin/python3 server.py
 ```
 
@@ -93,7 +93,7 @@ config.pyは1ファイルなので丸ごと上書きでも安全だったが、`
 
 ```bash
 # 元に戻す例
-cp config.py.bak.20260825_153000 ../togikaidrive-dev/config.py
+cp config.py.bak.20260825_153000 ../../togikaidrive-dev/config.py
 ```
 
 ## 項目を追加・分類を変更したい場合

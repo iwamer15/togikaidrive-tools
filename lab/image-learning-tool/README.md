@@ -13,7 +13,7 @@
 ## 使い方
 
 ```bash
-cd ト技会-minicar/image-learning-tool
+cd ト技会-minicar/lab/image-learning-tool
 python3 server.py
 ```
 
